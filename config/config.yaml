@@ -1,0 +1,22 @@
+# Central runtime configuration for AIris
+api:
+  key: "YOUR_API_KEY"
+  secret: "YOUR_API_SECRET"
+  base_url: "https://api.binance.us"
+
+trading:
+  pair: "BTCUSDT"
+  interval: "1h"
+  max_position_size: 1000
+  max_drawdown: 0.2
+
+risk:
+  stop_loss_pct: 0.03
+  take_profit_pct: 0.05
+  max_daily_trades: 10
+
+logging:
+  level: "INFO"
+  file: "logs/aiiris.log"
+  max_size: 10485760  # 10MB
+  backup_count: 5 
