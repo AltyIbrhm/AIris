@@ -10,13 +10,76 @@
 - [x] Test infrastructure
 
 ## Phase 2: Execution & Monitoring 🚀
-- [ ] Real-time data processing
-- [ ] Order execution system
-- [ ] Position management
-- [ ] Performance monitoring
-- [ ] Alert system
-- [ ] Backtesting framework
-- [ ] Strategy optimization
+
+### Step 1: Core Execution Loop
+- [ ] Create main.py entry point
+- [ ] Implement async trading loop orchestration
+- [ ] Initialize config, logger, and mock components
+- [ ] Implement run_trading_loop() with:
+  - Market data fetching
+  - Signal routing
+  - Risk filtering
+  - Trade execution
+  - Result logging
+
+### Step 2: Market Data Fetcher
+- [ ] Implement MarketDataFetcher class
+- [ ] Add fetch_latest_candle() functionality
+- [ ] Support real-time data streaming
+- [ ] Create MockMarketDataGenerator for testing
+- [ ] Integrate with Binance US testnet/live API
+
+### Step 3: Signal Router
+- [ ] Build SignalRouter class
+- [ ] Implement strategy loading system
+- [ ] Add signal aggregation logic
+- [ ] Support multiple strategy signals
+- [ ] Implement confidence scoring
+
+### Step 4: Risk Management Integration
+- [ ] Create RiskManager.check() system
+- [ ] Implement confidence thresholds
+- [ ] Add SL/TP bounds checking
+- [ ] Implement drawdown monitoring
+- [ ] Add exposure management
+- [ ] Create risk_config.json
+
+### Step 5: Paper Trading Engine
+- [ ] Implement PaperTradingEngine class
+- [ ] Add order submission system
+- [ ] Create position tracking
+- [ ] Implement PnL calculation
+- [ ] Add SL/TP execution
+- [ ] Create state management
+
+### Step 6: Trade Logger & Event Logging
+- [ ] Implement structured trade logging
+- [ ] Add signal logging
+- [ ] Create risk event logging
+- [ ] Implement portfolio state tracking
+- [ ] Add log rotation
+- [ ] Create log analysis tools
+
+### Step 7: Test Mode Support
+- [ ] Add test_mode configuration
+- [ ] Implement MockMarketDataGenerator
+- [ ] Create fast-forward testing
+- [ ] Add test data generation
+- [ ] Implement test result validation
+
+### Step 8: Integration Tests
+- [ ] Create execution loop tests
+- [ ] Implement trade flow tests
+- [ ] Add risk rejection tests
+- [ ] Create SL/TP trigger tests
+- [ ] Implement signal conflict tests
+
+### Phase 2.5: Optional Enhancements
+- [ ] Trade metrics CSV export
+- [ ] Position visualizer with matplotlib
+- [ ] Configurable logging verbosity
+- [ ] Performance analytics dashboard
+- [ ] Trade replay functionality
 
 ## Phase 3: AI Integration 🧠
 - [ ] LSTM model implementation
