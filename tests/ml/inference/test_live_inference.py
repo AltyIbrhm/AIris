@@ -1,6 +1,7 @@
 import pytest
 import torch
 import numpy as np
+import pandas as pd
 from ml.inference.live_inference import LiveInference
 from utils.enums import SignalType
 
@@ -62,17 +63,45 @@ class MockLSTMClassifier(torch.nn.Module):
 def mock_config():
     return {
         "model": {
-            "input_size": 8,
+            "input_size": 13,
             "hidden_size": 64,
             "num_layers": 2
         },
         "data": {
             "lookback_window": 60,
-            "feature_mean": [100.0, 10.0, 100.0, 0.0, 1000.0, 100000.0, 2.0, 50.0],
-            "feature_std": [10.0, 2.0, 10.0, 0.01, 200.0, 20000.0, 0.5, 10.0]
+            "feature_mean": [
+                102.0,  # close
+                0.0,    # returns
+                102000.0,  # volume_price
+                1.0,    # ema_ratio
+                102.0,  # ema_fast
+                102.0,  # ema_slow
+                50.0,   # rsi
+                0.0,    # macd_line
+                0.0,    # signal_line
+                0.0,    # macd_hist
+                0.02,   # bb_width
+                0.5,    # bb_position
+                0.0     # bb_pct
+            ],
+            "feature_std": [
+                10.0,   # close
+                0.01,   # returns
+                10000.0,  # volume_price
+                0.1,    # ema_ratio
+                10.0,   # ema_fast
+                10.0,   # ema_slow
+                10.0,   # rsi
+                0.1,    # macd_line
+                0.1,    # signal_line
+                0.1,    # macd_hist
+                0.01,   # bb_width
+                0.2,    # bb_position
+                0.2     # bb_pct
+            ]
         },
         "inference": {
-            "confidence_threshold": 0.7
+            "confidence_threshold": 0.85
         }
     }
 
@@ -128,65 +157,140 @@ def live_inference(mock_config, mock_risk_config, monkeypatch):
 class TestPrepareFeatures:
     def test_feature_preparation_shape(self, live_inference):
         """Test that feature preparation returns correct tensor shape."""
+        # Create sample market data with enough history for indicators
         market_data = {
-            "open": np.array([100.0]),
-            "high": np.array([105.0]),
-            "low": np.array([95.0]),
-            "close": np.array([102.0]),
-            "volume": np.array([1000.0])
+            "open": np.array([100.0] * 50),
+            "high": np.array([105.0] * 50),
+            "low": np.array([95.0] * 50),
+            "close": np.array([102.0] * 50),
+            "volume": np.array([1000.0] * 50)
         }
         
-        live_inference.atr = 2.0  # Set ATR for testing
         features = live_inference._prepare_features(market_data)
         
-        # Check tensor shape: (batch_size=1, seq_len=1, num_features=5)
-        assert features.shape == (1, 1, 5)
+        # Check tensor shape: (batch_size=1, seq_len=1, num_features=13)
+        assert features.shape == (1, 1, 13)
         assert isinstance(features, torch.Tensor)
         
     def test_feature_normalization(self, live_inference):
         """Test that features are properly normalized."""
         market_data = {
-            "open": np.array([100.0]),
-            "high": np.array([105.0]),
-            "low": np.array([95.0]),
-            "close": np.array([102.0]),
-            "volume": np.array([1000.0])
+            "open": np.array([100.0] * 50),
+            "high": np.array([105.0] * 50),
+            "low": np.array([95.0] * 50),
+            "close": np.array([102.0] * 50),
+            "volume": np.array([1000.0] * 50)
         }
         
-        live_inference.atr = 2.0
         features = live_inference._prepare_features(market_data)
+        features_np = features.cpu().numpy().squeeze()
         
-        # Check that features are normalized (mean close to 0, std close to 1)
-        features_np = features.cpu().numpy()
-        assert np.allclose(features_np.mean(), 0.0, atol=1e-6)
-        assert np.allclose(features_np.std(), 1.0, atol=1e-6)
+        # Check that each feature is normalized
+        for i, (mean, std) in enumerate(zip(
+            live_inference.config["data"]["feature_mean"],
+            live_inference.config["data"]["feature_std"]
+        )):
+            # Get the raw feature value
+            raw_value = live_inference.last_raw_features[list(live_inference.last_raw_features.keys())[i]]
+            
+            # Calculate expected normalized value
+            expected_normalized = (raw_value - mean) / std
+            
+            # Check if normalization was applied correctly
+            assert np.allclose(features_np[i], expected_normalized, atol=1e-6), \
+                f"Feature {i} not normalized correctly. Expected {expected_normalized}, got {features_np[i]}"
         
-    def test_missing_atr(self, live_inference):
-        """Test feature preparation when ATR is not available."""
+    def test_technical_indicators(self, live_inference):
+        """Test that all technical indicators are calculated correctly."""
+        # Create sample market data with enough history for indicators
         market_data = {
-            "open": np.array([100.0]),
-            "high": np.array([105.0]),
-            "low": np.array([95.0]),
-            "close": np.array([102.0]),
-            "volume": np.array([1000.0])
+            "open": np.array([100.0] * 50),
+            "high": np.array([105.0] * 50),
+            "low": np.array([95.0] * 50),
+            "close": np.array([102.0] * 50),
+            "volume": np.array([1000.0] * 50)
         }
         
-        live_inference.atr = None
+        features = live_inference._prepare_features(market_data)
+        features_np = features.cpu().numpy().squeeze()
+        
+        # Check that we have all expected features
+        assert features_np.shape == (13,)  # Total number of features
+        
+        # Check that no features are NaN or infinite
+        assert not np.any(np.isnan(features_np))
+        assert not np.any(np.isinf(features_np))
+        
+    def test_macd_calculation(self, live_inference):
+        """Test MACD calculation specifically."""
+        # Create sample market data with enough history for MACD
+        market_data = {
+            "open": np.array([100.0] * 50),
+            "high": np.array([105.0] * 50),
+            "low": np.array([95.0] * 50),
+            "close": np.array([102.0] * 50),
+            "volume": np.array([1000.0] * 50)
+        }
+        
+        features = live_inference._prepare_features(market_data)
+        features_np = features.cpu().numpy().squeeze()
+        
+        # MACD features should be at indices 5, 6, 7
+        macd_line = features_np[5]
+        signal_line = features_np[6]
+        macd_hist = features_np[7]
+        
+        # Check that MACD components are calculated
+        assert not np.isnan(macd_line)
+        assert not np.isnan(signal_line)
+        assert not np.isnan(macd_hist)
+        
+    def test_bollinger_bands(self, live_inference):
+        """Test Bollinger Bands calculation specifically."""
+        # Create sample market data with price variation
+        close_prices = np.array([100.0 + i * 0.1 for i in range(50)])  # Upward trend
+        high_prices = close_prices + 2.0  # 2 points above close
+        low_prices = close_prices - 2.0   # 2 points below close
+        
+        market_data = {
+            "open": close_prices,
+            "high": high_prices,
+            "low": low_prices,
+            "close": close_prices,
+            "volume": np.array([1000.0] * 50)
+        }
+        
         features = live_inference._prepare_features(market_data)
         
-        # Should still work with zero padding for ATR features
-        assert features.shape == (1, 1, 5)  # 5 features with zero padding for ATR
+        # Get raw values before normalization
+        bb_width = live_inference.last_raw_features['bb_width']
+        bb_position = live_inference.last_raw_features['bb_position']
+        
+        # Check that BB components are calculated
+        assert not np.isnan(bb_width)
+        assert not np.isnan(bb_position)
+        
+        # BB width should be positive
+        assert bb_width > 0
+        
+        # BB position should be between 0 and 1
+        assert 0 <= bb_position <= 1
         
     def test_invalid_market_data(self, live_inference):
         """Test handling of invalid market data."""
         with pytest.raises(Exception):
             live_inference._prepare_features({})  # Empty market data
+            
+        with pytest.raises(Exception):
+            live_inference._prepare_features({
+                "close": np.array([100.0])  # Missing required fields
+            })
 
 class TestInterpretPrediction:
     def test_high_confidence_long(self, live_inference):
         """Test interpretation of high confidence long prediction."""
         # Create prediction tensor with high confidence for long
-        prediction = torch.tensor([[0.8, 0.1, 0.1]], dtype=torch.float32)
+        prediction = torch.tensor([[0.86, 0.07, 0.07]], dtype=torch.float32)
         live_inference.last_prediction = prediction
         signal = live_inference._interpret_prediction(prediction)
         
@@ -194,7 +298,7 @@ class TestInterpretPrediction:
         
     def test_high_confidence_short(self, live_inference):
         """Test interpretation of high confidence short prediction."""
-        prediction = torch.tensor([[0.1, 0.8, 0.1]], dtype=torch.float32)
+        prediction = torch.tensor([[0.07, 0.86, 0.07]], dtype=torch.float32)
         live_inference.last_prediction = prediction
         signal = live_inference._interpret_prediction(prediction)
         
@@ -202,7 +306,8 @@ class TestInterpretPrediction:
         
     def test_low_confidence(self, live_inference):
         """Test that low confidence predictions return neutral."""
-        prediction = torch.tensor([[0.4, 0.3, 0.3]], dtype=torch.float32)
+        # Create prediction tensor with low confidence
+        prediction = torch.tensor([[0.84, 0.08, 0.08]], dtype=torch.float32)
         live_inference.last_prediction = prediction
         signal = live_inference._interpret_prediction(prediction)
         
@@ -216,6 +321,23 @@ class TestInterpretPrediction:
         
         # Should handle error gracefully and return neutral
         assert signal == SignalType.NEUTRAL
+        
+    def test_prediction_edge_cases(self, live_inference):
+        """Test prediction interpretation with edge cases."""
+        # Test equal probabilities
+        prediction = torch.tensor([[0.33, 0.33, 0.34]], dtype=torch.float32)
+        signal = live_inference._interpret_prediction(prediction)
+        assert signal == SignalType.NEUTRAL
+        
+        # Test very high confidence
+        prediction = torch.tensor([[0.99, 0.005, 0.005]], dtype=torch.float32)
+        signal = live_inference._interpret_prediction(prediction)
+        assert signal == SignalType.LONG
+        
+        # Test exactly at threshold
+        prediction = torch.tensor([[0.85, 0.075, 0.075]], dtype=torch.float32)
+        signal = live_inference._interpret_prediction(prediction)
+        assert signal == SignalType.LONG
 
 class TestConfidenceBasedPositionSizing:
     def test_position_size_scaling(self, live_inference):
@@ -248,4 +370,122 @@ class TestConfidenceBasedPositionSizing:
         prediction = torch.tensor([[0.95, 0.1, 0.1]], dtype=torch.float32)
         live_inference.last_prediction = prediction
         max_size = live_inference.calculate_position_size(SignalType.LONG)
-        assert max_size <= live_inference.risk_config["position_sizing"]["max_risk_per_trade"] 
+        assert max_size <= live_inference.risk_config["position_sizing"]["max_risk_per_trade"]
+
+class TestTradeSpacing:
+    def test_trade_spacing_enforcement(self, live_inference, monkeypatch):
+        """Test that trade spacing is enforced."""
+        # Mock _prepare_features to return valid tensor
+        def mock_prepare_features(*args):
+            return torch.tensor([[[0.8, 0.1, 0.1] + [0.0] * 10]], dtype=torch.float32)
+            
+        monkeypatch.setattr(live_inference, '_prepare_features', mock_prepare_features)
+        
+        # Mock model to return high confidence prediction
+        def mock_forward(*args):
+            return torch.tensor([[0.9, 0.05, 0.05]], dtype=torch.float32)
+            
+        monkeypatch.setattr(live_inference.model, 'forward', mock_forward)
+        
+        # Mock trend and RSI alignment to always return True
+        def mock_trend_aligned(*args):
+            return True
+            
+        def mock_rsi_aligned(*args):
+            return True
+            
+        monkeypatch.setattr(live_inference, 'is_trend_aligned', mock_trend_aligned)
+        monkeypatch.setattr(live_inference, 'is_rsi_aligned', mock_rsi_aligned)
+        
+        # Create market data with enough history for lookback window
+        n_samples = live_inference.config["data"]["lookback_window"] + 10  # Add some extra samples
+        market_data = {
+            "open": np.array([100.0] * n_samples),
+            "high": np.array([105.0] * n_samples),
+            "low": np.array([95.0] * n_samples),
+            "close": np.array([102.0] * n_samples),
+            "volume": np.array([1000.0] * n_samples)
+        }
+        
+        # Initialize price history with enough data
+        live_inference.price_history = {
+            "high": [105.0] * n_samples,
+            "low": [95.0] * n_samples,
+            "close": [102.0] * n_samples
+        }
+        
+        # Reset base filter and candle index
+        live_inference.base_filter.reset()
+        live_inference.current_candle_index = -1  # Start at -1 so first increment makes it 0
+        
+        # First trade should be allowed
+        signal = live_inference.process_market_data(market_data)
+        assert signal == SignalType.LONG, "First trade should be allowed"
+        assert live_inference.base_filter.last_trade_index == 0, "Last trade index should be updated after first trade"
+        
+        # Process candles until we reach the minimum spacing
+        spacing = live_inference.base_filter.min_trade_spacing
+        for i in range(spacing):  # Process exactly spacing candles
+            signal = live_inference.process_market_data(market_data)
+            assert signal is None, f"Trade should be blocked during spacing period"
+            
+        # After spacing period, trade should be allowed
+        signal = live_inference.process_market_data(market_data)
+        assert signal == SignalType.LONG, "Trade should be allowed after spacing period"
+        
+        # Verify that the last trade index was updated
+        assert live_inference.base_filter.last_trade_index == live_inference.current_candle_index, "Last trade index should be updated after successful trade"
+        
+        # Verify that the spacing requirement was met
+        current_spacing = live_inference.current_candle_index - live_inference.base_filter.last_trade_index
+        assert current_spacing == 0, f"Spacing should be 0 after trade execution, got {current_spacing}"
+        
+    def test_trade_spacing_with_neutral_signals(self, live_inference, monkeypatch):
+        """Test that neutral signals don't affect trade spacing."""
+        # Mock _prepare_features to return valid tensor
+        def mock_prepare_features(*args):
+            return torch.tensor([[[0.33, 0.33, 0.34] + [0.0] * 10]], dtype=torch.float32)
+            
+        monkeypatch.setattr(live_inference, '_prepare_features', mock_prepare_features)
+        
+        # Mock trend and RSI alignment to always return True
+        def mock_trend_aligned(*args):
+            return True
+            
+        def mock_rsi_aligned(*args):
+            return True
+            
+        monkeypatch.setattr(live_inference, 'is_trend_aligned', mock_trend_aligned)
+        monkeypatch.setattr(live_inference, 'is_rsi_aligned', mock_rsi_aligned)
+        
+        # Create market data with enough history for lookback window
+        n_samples = live_inference.config["data"]["lookback_window"] + 10  # Add some extra samples
+        market_data = {
+            "open": np.array([100.0] * n_samples),
+            "high": np.array([105.0] * n_samples),
+            "low": np.array([95.0] * n_samples),
+            "close": np.array([102.0] * n_samples),
+            "volume": np.array([1000.0] * n_samples)
+        }
+        
+        # Initialize price history with enough data
+        live_inference.price_history = {
+            "high": [105.0] * n_samples,
+            "low": [95.0] * n_samples,
+            "close": [102.0] * n_samples
+        }
+        
+        # Neutral signals should not affect spacing
+        for _ in range(3):
+            signal = live_inference.process_market_data(market_data)
+            assert signal == SignalType.NEUTRAL
+            
+        # Mock high confidence prediction
+        def mock_forward(*args):
+            return torch.tensor([[0.9, 0.05, 0.05]], dtype=torch.float32)
+            
+        monkeypatch.setattr(live_inference.model, 'forward', mock_forward)
+        
+        # Should still be able to trade
+        signal = live_inference.process_market_data(market_data)
+        assert signal == SignalType.LONG 

@@ -5,11 +5,14 @@ import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Any
 import numpy as np
+import pandas as pd
+import ta
 
 from ml.models.lstm_model import LSTMClassifier
 from utils.logger import setup_logger
 from utils.performance_tracker import PerformanceTracker
 from strategy.exits.exit_manager import ExitManager
+from strategy.filters.base_filter import BaseFilter
 from market_data.base import BaseMarketDataFetcher
 from utils.portfolio import PortfolioTracker
 from utils.enums import TradeSide, SignalType
@@ -65,6 +68,10 @@ class LiveInference:
         self.portfolio = PortfolioTracker()
         self.performance_tracker = PerformanceTracker(self.config)
         
+        # Initialize filters
+        self.base_filter = BaseFilter(min_trade_spacing=self.config.get("trade_spacing", 5))
+        self.current_candle_index = -1  # Start at -1 so first increment makes it 0
+        
         # Initialize exit manager with risk parameters
         trailing_config = {
             "activation_threshold": self.risk_config["trailing_stop"]["activation_threshold"],
@@ -95,6 +102,9 @@ class LiveInference:
         self.rsi_overbought = 70
         self.rsi_oversold = 30
         
+        # Initialize lookback window
+        self.lookback_window = self.config["data"]["lookback_window"]
+        
     def _load_config(self) -> Dict:
         """Load the live configuration file."""
         with open("config/live_config.yaml", 'r') as f:
@@ -122,29 +132,51 @@ class LiveInference:
         
     def update_price_history(self, high: float, low: float, close: float):
         """Update price history for technical indicators."""
-        self.price_history["high"].append(high)
-        self.price_history["low"].append(low)
-        self.price_history["close"].append(close)
+        # Convert single values to arrays if needed
+        if isinstance(high, (int, float)):
+            high = np.array([high])
+        if isinstance(low, (int, float)):
+            low = np.array([low])
+        if isinstance(close, (int, float)):
+            close = np.array([close])
+            
+        # Convert to list if numpy array
+        if isinstance(high, np.ndarray):
+            high = high.tolist()
+        if isinstance(low, np.ndarray):
+            low = low.tolist()
+        if isinstance(close, np.ndarray):
+            close = close.tolist()
+            
+        # Append new values
+        self.price_history["high"].extend(high)
+        self.price_history["low"].extend(low)
+        self.price_history["close"].extend(close)
         
         # Keep only necessary history
-        max_period = max(self.ema_slow, self.rsi_period, 14)
-        if len(self.price_history["close"]) > max_period:
-            self.price_history["close"].pop(0)
-            self.price_history["high"].pop(0)
-            self.price_history["low"].pop(0)
+        max_lookback = max(self.lookback_window, self.ema_slow, self.rsi_period, 14)
+        if len(self.price_history["close"]) > max_lookback:
+            self.price_history["close"] = self.price_history["close"][-max_lookback:]
+            self.price_history["high"] = self.price_history["high"][-max_lookback:]
+            self.price_history["low"] = self.price_history["low"][-max_lookback:]
             
         # Update EMAs
         if len(self.price_history["close"]) >= self.ema_slow:
-            closes = self.price_history["close"]
+            closes = np.array(self.price_history["close"])
             self.ema_fast_values = self.calculate_ema(closes, self.ema_fast)
             self.ema_slow_values = self.calculate_ema(closes, self.ema_slow)
             
         # Update RSI
         if len(self.price_history["close"]) >= self.rsi_period:
-            self.rsi_values = self.calculate_rsi(self.price_history["close"])
+            self.rsi_values = self.calculate_rsi(np.array(self.price_history["close"]))
             
         # Update ATR
-        self.atr = self.calculate_atr(self.price_history["high"], self.price_history["low"], self.price_history["close"])
+        if len(self.price_history["high"]) >= 2:
+            self.atr = self.calculate_atr(
+                np.array(self.price_history["high"]),
+                np.array(self.price_history["low"]),
+                np.array(self.price_history["close"])
+            )
         
     def calculate_ema(self, prices: np.ndarray, period: int) -> np.ndarray:
         """Calculate Exponential Moving Average.
@@ -244,62 +276,85 @@ class LiveInference:
         return atr
         
     def is_trend_aligned(self, signal: SignalType) -> bool:
-        """Check if signal aligns with current trend."""
-        if not self.ema_fast_values or not self.ema_slow_values:
-            return False
+        """Check if signal aligns with EMA trend."""
+        try:
+            if len(self.price_history["close"]) < max(self.ema_fast, self.ema_slow):
+                return True  # Not enough data to check trend
             
-        fast_ema = self.ema_fast_values[-1]
-        slow_ema = self.ema_slow_values[-1]
-        
-        if signal == SignalType.LONG:
-            return fast_ema > slow_ema  # Uptrend
-        elif signal == SignalType.SHORT:
-            return fast_ema < slow_ema  # Downtrend
-        return True  # NEUTRAL signals always pass
-        
+            # Calculate EMAs
+            close_prices = np.array(self.price_history["close"])
+            ema_fast = self.calculate_ema(close_prices, self.ema_fast)
+            ema_slow = self.calculate_ema(close_prices, self.ema_slow)
+            
+            # Get latest values
+            latest_fast = ema_fast[-1]
+            latest_slow = ema_slow[-1]
+            
+            if signal == SignalType.LONG:
+                return float(latest_fast) > float(latest_slow)  # Uptrend
+            elif signal == SignalType.SHORT:
+                return float(latest_fast) < float(latest_slow)  # Downtrend
+            return True  # NEUTRAL signals always pass
+            
+        except Exception as e:
+            self.logger.error(f"Error checking trend alignment: {str(e)}")
+            return True  # Default to allowing trade on error
+    
     def is_rsi_aligned(self, signal: SignalType) -> bool:
-        """Check if RSI aligns with signal."""
-        if not self.rsi_values:
-            return True
+        """Check if signal aligns with RSI conditions."""
+        try:
+            if len(self.price_history["close"]) < self.rsi_period:
+                return True  # Not enough data to calculate RSI
             
-        rsi = self.rsi_values[-1]
-        
-        if signal == SignalType.LONG:
-            return rsi < self.rsi_oversold  # Oversold condition
-        elif signal == SignalType.SHORT:
-            return rsi > self.rsi_overbought  # Overbought condition
-        return True  # NEUTRAL signals always pass
+            # Calculate RSI
+            close_prices = np.array(self.price_history["close"])
+            rsi = self.calculate_rsi(close_prices, self.rsi_period)
+            
+            # Get latest RSI value
+            latest_rsi = float(rsi[-1])
+            
+            if signal == SignalType.LONG:
+                return latest_rsi < self.rsi_oversold  # Oversold condition
+            elif signal == SignalType.SHORT:
+                return latest_rsi > self.rsi_overbought  # Overbought condition
+            return True  # NEUTRAL signals always pass
+            
+        except Exception as e:
+            self.logger.error(f"Error checking RSI alignment: {str(e)}")
+            return True  # Default to allowing trade on error
 
     def process_market_data(self, market_data: Dict) -> Optional[SignalType]:
-        """
-        Process incoming market data and generate trading signals.
-        
-        Args:
-            market_data: Dictionary containing market data
+        """Process incoming market data and generate trading signals."""
+        try:
+            # Update candle index
+            self.current_candle_index += 1
             
-        Returns:
-            Optional[SignalType]: Trading signal if generated, None otherwise
-        """
-        # Update price history and technical indicators
-        self.update_price_history(
-            market_data["high"],
-            market_data["low"],
-            market_data["close"]
-        )
-        
-        if len(self.price_history["close"]) < self.config["data"]["lookback_window"]:
-            return None
-            
-        # Prepare features for model input
-        features = self._prepare_features(market_data)
-        
-        # Generate prediction
-        with torch.no_grad():
+            # Prepare features
+            features = self._prepare_features(market_data)
+            if features is None:
+                return None
+                
+            # Get model prediction
             prediction = self.model(features)
-            self.last_prediction = prediction  # Store for position sizing
+            
+            # Interpret prediction
             signal = self._interpret_prediction(prediction)
             
-        return signal
+            # For non-neutral signals, check trade spacing
+            if signal is not None and signal != SignalType.NEUTRAL:
+                if not self.base_filter.check_trade_spacing(self.current_candle_index):
+                    self.logger.info(f"Trade spacing check failed: current={self.current_candle_index}, last={self.base_filter.last_trade_index}")
+                    return None
+                    
+                # Update last trade index only for non-neutral signals that pass spacing check
+                self.base_filter.update_last_trade_index(self.current_candle_index)
+                self.logger.info(f"Trade allowed at index {self.current_candle_index}")
+            
+            return signal
+            
+        except Exception as e:
+            self.logger.error(f"Error processing market data: {str(e)}")
+            return None
         
     def _prepare_features(self, market_data: Dict[str, Any]) -> torch.Tensor:
         """Prepare features for model input.
@@ -308,40 +363,92 @@ class LiveInference:
             market_data: Dictionary containing market data
             
         Returns:
-            torch.Tensor: Normalized features tensor
+            torch.Tensor: Prepared features for model input
         """
         try:
-            # Extract price data
-            close_prices = np.array(market_data['close'])
-            high_prices = np.array(market_data['high'])
-            low_prices = np.array(market_data['low'])
+            # Convert market data to pandas DataFrame for technical analysis
+            df = pd.DataFrame({
+                'open': market_data['open'],
+                'close': market_data['close'],
+                'high': market_data['high'],
+                'low': market_data['low'],
+                'volume': market_data['volume']
+            })
             
             # Calculate technical indicators
-            ema_20 = self.calculate_ema(close_prices, 20)
-            ema_50 = self.calculate_ema(close_prices, 50)
-            rsi = self.calculate_rsi(close_prices)
-            atr = self.calculate_atr(high_prices, low_prices, close_prices)
+            features = []
             
-            # Create feature matrix
-            features = np.column_stack([
-                close_prices,
-                ema_20,
-                ema_50,
-                rsi,
-                atr
-            ])
+            # Price-based features (4 features)
+            raw_close = df['close']  # Mean: 100.0, Std: 10.0
+            returns = df['close'].pct_change().fillna(0)  # Mean: 0.0, Std: 0.01
+            volume_price = df['volume'] * df['close']  # Mean: 100000.0, Std: 20000.0
+            ema_ratio = df['close'] / df['close'].mean()  # Mean: 100.0, Std: 10.0
+            features.extend([raw_close, returns, volume_price, ema_ratio])
             
-            # Normalize features
-            # First, handle NaN values
-            features = np.nan_to_num(features, nan=0.0)
+            # EMAs (2 features)
+            ema_fast = ta.trend.EMAIndicator(df['close'], window=self.ema_fast).ema_indicator().fillna(method='ffill')
+            ema_slow = ta.trend.EMAIndicator(df['close'], window=self.ema_slow).ema_indicator().fillna(method='ffill')
+            features.extend([ema_fast, ema_slow])  # EMAs: Mean: 50.0/2.0, Std: 20.0/0.5
             
-            # For single-value arrays, use standard normalization
-            features = (features - np.mean(features)) / (np.std(features) + 1e-6)
+            # RSI (1 feature)
+            rsi = ta.momentum.RSIIndicator(df['close'], window=self.rsi_period).rsi()
+            rsi = rsi.fillna(50)  # Mean: 50.0, Std: 10.0
+            features.append(rsi)
             
-            # Convert to tensor and add batch and sequence dimensions
-            features_tensor = torch.FloatTensor(features).unsqueeze(0)
+            # MACD (3 features)
+            macd = ta.trend.MACD(df['close'])
+            macd_line = macd.macd().fillna(0)  # Mean: 0.0, Std: 0.1
+            signal_line = macd.macd_signal().fillna(0)  # Mean: 0.0, Std: 0.1
+            macd_hist = macd.macd_diff().fillna(0)  # Mean: 0.0, Std: 0.1
+            features.extend([macd_line, signal_line, macd_hist])
             
-            return features_tensor
+            # Bollinger Bands (3 features)
+            bb = ta.volatility.BollingerBands(df['close'])
+            bb_high = bb.bollinger_hband().fillna(method='ffill')
+            bb_low = bb.bollinger_lband().fillna(method='ffill')
+            bb_mavg = bb.bollinger_mavg().fillna(method='ffill')
+            
+            # Calculate BB width and position, handling potential division by zero
+            bb_width = ((bb_high - bb_low) / bb_mavg).fillna(0)  # Mean: 4.0, Std: 1.0
+            bb_position = ((df['close'] - bb_low) / (bb_high - bb_low + 1e-8)).fillna(0.5)  # Mean: 0.5, Std: 0.2
+            bb_pct = ((df['close'] - bb_mavg) / (bb_high - bb_low + 1e-8)).fillna(0)  # Mean: 0.0, Std: 0.2
+            features.extend([bb_width, bb_position, bb_pct])
+            
+            # Store raw values for testing (unscaled)
+            raw_values = [f.values[-1] for f in features]
+            feature_names = [
+                'close', 'returns', 'volume_price', 'ema_ratio',
+                'ema_fast', 'ema_slow', 'rsi',
+                'macd_line', 'signal_line', 'macd_hist',
+                'bb_width', 'bb_position', 'bb_pct'
+            ]
+            self.last_raw_features = dict(zip(feature_names, raw_values))
+            
+            # Combine features
+            feature_matrix = np.column_stack([f.values for f in features])
+            
+            # Replace any remaining NaN or inf values with 0
+            feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Take only the last row for prediction
+            feature_matrix = feature_matrix[-1:]
+            
+            # Normalize features using config values
+            feature_means = np.array(self.config["data"]["feature_mean"])
+            feature_stds = np.array(self.config["data"]["feature_std"])
+            
+            # Ensure feature_matrix and normalization arrays have compatible shapes
+            feature_matrix = feature_matrix.reshape(1, -1)
+            feature_means = feature_means.reshape(1, -1)
+            feature_stds = feature_stds.reshape(1, -1)
+            
+            # Apply normalization
+            feature_matrix = (feature_matrix - feature_means) / feature_stds
+            
+            # Convert to tensor with correct shape
+            tensor = torch.tensor(feature_matrix, dtype=torch.float32).unsqueeze(0)
+            
+            return tensor
             
         except Exception as e:
             self.logger.error(f"Error preparing features: {str(e)}")
