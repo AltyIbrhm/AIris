@@ -41,11 +41,11 @@ def plot_confusion_matrix(cm, save_path):
     plt.close()
     logger.info(f"Confusion matrix saved to {save_path}")
 
-def evaluate():
+def evaluate(config_path="config/model_config.yaml"):
     """Evaluate the trained model on test data."""
     try:
         # Load configuration
-        config = load_config()
+        config = load_config(config_path)
         logger.info("Configuration loaded successfully")
 
         # Create output directory
