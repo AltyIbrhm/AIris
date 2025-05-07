@@ -46,9 +46,7 @@ def setup_logger(name: str, log_dir: str) -> logging.Logger:
     
     # Create log directory if it doesn't exist
     try:
-        os.makedirs(log_dir)
-    except FileExistsError:
-        pass
+        os.makedirs(log_dir, exist_ok=True)
     except OSError as e:
         # Re-raise the OSError for invalid paths
         raise OSError(f"Failed to create log directory: {log_dir}") from e

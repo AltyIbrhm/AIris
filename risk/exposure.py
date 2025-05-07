@@ -1,7 +1,7 @@
 """
 Handles position sizing, daily limits, and exposure management.
 """
-from typing import Dict, Any
+from typing import Dict, Any, List
 from .base import BaseRiskManager
 import time
 
@@ -16,6 +16,38 @@ class ExposureManager(BaseRiskManager):
         self.daily_pnl = 0.0
         self.initial_balance = self.max_position_size
         self.last_reset = time.time()
+
+    async def filter_signals(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter trading signals based on risk parameters.
+        
+        Args:
+            signals: List of trading signals to filter
+            
+        Returns:
+            List of signals that pass risk checks
+        """
+        filtered_signals = []
+        
+        # Reset daily counters if needed
+        self._reset_daily_if_needed()
+        
+        for signal in signals:
+            # Convert signal to position format for risk evaluation
+            position = {
+                'symbol': signal.get('symbol'),
+                'size': signal.get('size', 1.0),
+                'entry_price': signal.get('price', 0.0),
+                'side': signal.get('side', 'buy')
+            }
+            
+            # Evaluate risk
+            risk_eval = self.evaluate_risk(position)
+            
+            # Add signal if it passes risk checks
+            if risk_eval.get('allowed', False):
+                filtered_signals.append(signal)
+        
+        return filtered_signals
 
     def validate_position(self, position: Dict[str, Any]) -> bool:
         """Validate position data."""
