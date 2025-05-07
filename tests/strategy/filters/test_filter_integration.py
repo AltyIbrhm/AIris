@@ -65,6 +65,7 @@ def test_consecutive_trade_prevention():
             trend.check_entry(fast_ema, slow_ema, "BUY") and
             base.check_trade_spacing(i)):
             trades.append(i)
+            base.update_last_trade_index(i)  # Update last trade index when trade is taken
     
     # Verify minimum spacing between trades
     for i in range(len(trades) - 1):
