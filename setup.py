@@ -27,7 +27,8 @@ setup(
         "torch>=2.1.0",
         "ta>=0.10.0",
         "scikit-learn>=1.0.0",
-        "matplotlib>=3.0.0"
+        "matplotlib>=3.0.0",
+        "seaborn>=0.12.0"
     ],
     python_requires=">=3.8",
 ) 
