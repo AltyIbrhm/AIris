@@ -5,9 +5,9 @@ from enum import Enum, auto
 
 class SignalType(Enum):
     """Types of trading signals."""
-    BUY = auto()
-    SELL = auto()
-    HOLD = auto()
+    LONG = auto()
+    SHORT = auto()
+    NEUTRAL = auto()
 
 class TradeSide(Enum):
     """Trading position sides."""
