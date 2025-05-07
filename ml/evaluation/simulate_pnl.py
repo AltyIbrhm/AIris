@@ -11,6 +11,7 @@ from ml.data.dataset_builder import TimeSeriesDataset
 from ml.models.lstm_model import LSTMClassifier
 import json
 from ml.evaluation.performance_tracker import PerformanceTracker
+from strategy.exits.exit_manager import ExitManager
 
 # Configure logging
 logging.basicConfig(
@@ -56,6 +57,22 @@ class PnLSimulator:
         self.rsi_oversold = rsi_oversold
         self.trailing_stop_activation = trailing_stop_activation or float(risk_config.get('trailing_stop_activation', 0.5))
         self.trailing_stop_distance = trailing_stop_distance or float(risk_config.get('trailing_stop_distance', 0.8))
+        
+        # Initialize ExitManager with config
+        trailing_config = {
+            "activation_threshold": self.trailing_stop_activation,
+            "trail_distance_atr_mult": self.trailing_stop_distance,
+            "max_loss_pct": self.max_loss_pct,
+            "max_holding_time": self.max_holding_periods
+        }
+        
+        hard_stop_config = {
+            "stop_loss_atr_mult": self.atr_multiplier,
+            "max_loss_pct": self.max_loss_pct,
+            "max_holding_time": self.max_holding_periods
+        }
+        
+        self.exit_manager = ExitManager(trailing_config, hard_stop_config)
         
         # Performance tracking
         self.balance_history = [initial_balance]
@@ -179,28 +196,6 @@ class PnLSimulator:
         position_size = risk_amount / (atr * self.atr_multiplier)
         return position_size
     
-    def update_trailing_stop(self, price: float, atr: float) -> None:
-        """Update trailing stop if conditions are met"""
-        if self.current_position is None:
-            return
-            
-        # Calculate profit target
-        target = abs(self.current_position['take_profit'] - self.current_position['entry_price'])
-        current_profit = abs(price - self.current_position['entry_price'])
-        
-        # Check if trailing stop should be activated
-        if current_profit >= target * self.trailing_stop_activation:
-            trailing_distance = atr * self.trailing_stop_distance
-            
-            if self.current_position['type'] == 'SELL':
-                new_stop = price + trailing_distance
-                if new_stop < self.current_position['stop_loss']:
-                    self.current_position['stop_loss'] = new_stop
-            else:  # BUY
-                new_stop = price - trailing_distance
-                if new_stop > self.current_position['stop_loss']:
-                    self.current_position['stop_loss'] = new_stop
-    
     def execute_trade(
         self,
         signal: Dict[str, Any],  # Changed from int to Dict
@@ -232,29 +227,22 @@ class PnLSimulator:
         
         # Check if we should close existing position
         if self.current_position:
-            # Update trailing stop if active
-            atr = self.calculate_atr()
-            self.update_trailing_stop(price, atr)
+            # Get price history for ATR calculation
+            high_prices = [p['high'] for p in self.price_history]
+            low_prices = [p['low'] for p in self.price_history]
+            close_prices = [p['close'] for p in self.price_history]
             
-            # Check stop conditions
-            stop_hit = price <= self.current_position['stop_loss'] if self.current_position['type'] == 'BUY' \
-                else price >= self.current_position['stop_loss']
-                
-            take_profit_hit = price >= self.current_position['take_profit'] if self.current_position['type'] == 'BUY' \
-                else price <= self.current_position['take_profit']
-                
-            # Close position if any exit condition is met
-            if stop_hit:
-                self.close_position(price, timestamp, "stop_loss")
-                return
-            elif take_profit_hit:
-                self.close_position(price, timestamp, "take_profit")
-                return
-                
-            # Check time-based exit
-            holding_time = timestamp - self.current_position['entry_time']
-            if holding_time.total_seconds() / 3600 >= self.max_holding_periods:
-                self.close_position(price, timestamp, "time_exit")
+            # Check exit conditions using ExitManager
+            exit_signal, exit_price, exit_reason = self.exit_manager.check_exit(
+                current_price=price,
+                high_prices=high_prices,
+                low_prices=low_prices,
+                close_prices=close_prices,
+                take_profit=self.current_position['take_profit']
+            )
+            
+            if exit_signal:
+                self.close_position(exit_price, timestamp, exit_reason)
                 return
         
         # Only open new position if confidence meets threshold
@@ -289,6 +277,16 @@ class PnLSimulator:
                 'entry_time': timestamp
             }
             
+            # Initialize ExitManager for new position
+            self.exit_manager.initialize_trade(
+                entry_price=price,
+                side='BUY',
+                high_prices=[p['high'] for p in self.price_history],
+                low_prices=[p['low'] for p in self.price_history],
+                close_prices=[p['close'] for p in self.price_history],
+                position_size=position_size
+            )
+            
         elif signal['action'] == 'sell' and not self.current_position:
             stop_loss = price + (atr * self.atr_multiplier)
             take_profit = price - (atr * self.atr_multiplier * 2)  # 2:1 reward-risk
@@ -303,6 +301,16 @@ class PnLSimulator:
                 'size': position_size,
                 'entry_time': timestamp
             }
+            
+            # Initialize ExitManager for new position
+            self.exit_manager.initialize_trade(
+                entry_price=price,
+                side='SELL',
+                high_prices=[p['high'] for p in self.price_history],
+                low_prices=[p['low'] for p in self.price_history],
+                close_prices=[p['close'] for p in self.price_history],
+                position_size=position_size
+            )
     
     def close_position(self, price: float, timestamp: datetime, reason: str) -> None:
         """Close current position and record trade"""
