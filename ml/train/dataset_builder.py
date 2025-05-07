@@ -2,6 +2,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 import logging
+import numpy as np
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +26,10 @@ class TimeSeriesDataset(Dataset):
             self.features = pd.read_csv(features_path)
             self.labels = pd.read_csv(labels_path)
             
+            # Drop non-numeric columns (like timestamp)
+            numeric_columns = self.features.select_dtypes(include=[np.number]).columns
+            self.features = self.features[numeric_columns]
+            
             # Validate sequence length
             if seq_len <= 0:
                 raise ValueError("Sequence length must be positive")
@@ -47,6 +52,7 @@ class TimeSeriesDataset(Dataset):
             # Log dataset info
             logger.info(f"Dataset initialized with {len(self)} samples")
             logger.info(f"Feature shape: {self.features.shape}")
+            logger.info(f"Feature columns: {', '.join(self.features.columns)}")
             logger.info(f"Label distribution: {self.labels['label'].value_counts().to_dict()}")
 
         except Exception as e:
@@ -74,7 +80,7 @@ class TimeSeriesDataset(Dataset):
                 raise IndexError(f"Index {idx} out of range [0, {len(self)})")
                 
             # Get sequence of features
-            x_seq = self.features.iloc[idx : idx + self.seq_len].values
+            x_seq = self.features.iloc[idx : idx + self.seq_len].values.astype(np.float32)
             
             # Get corresponding label
             y_label = self.labels.iloc[idx + self.seq_len]["label"]

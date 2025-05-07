@@ -24,7 +24,11 @@ def test_with_real_data():
             print(f"\nBatch {batch_idx + 1}:")
             print(f"Input shape: {x.shape}")  # Should be (batch_size, seq_len, num_features)
             print(f"Label shape: {y.shape}")  # Should be (batch_size,)
-            print(f"Label distribution: {torch.bincount(y)}")
+            
+            # Count labels in the batch
+            labels, counts = torch.unique(y, return_counts=True)
+            label_dist = {int(l.item()): int(c.item()) for l, c in zip(labels, counts)}
+            print(f"Label distribution in batch: {label_dist}")
             
             if batch_idx == 0:  # Print details for first batch only
                 print("\nDetailed first batch info:")
