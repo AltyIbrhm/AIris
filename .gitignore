@@ -60,4 +60,8 @@ build/
 
 # Misc
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Ignore backup files
+ml/features/*_base.py
+ml/features/*_v2_lagged.py 

@@ -34,11 +34,10 @@ def normalize_features(df: pd.DataFrame) -> pd.DataFrame:
     # Features that should be normalized to mean 0, std 1
     zscore_features = [
         'ema_8', 'ema_21', 'ema_ratio',
-        'macd_line', 'macd_signal', 'macd_hist',
+        'macd_line', 'macd_signal',
         'bb_width', 'bb_zscore',
         'momentum_10', 'rate_of_change_5',
-        'log_return_1', 'log_return_5',
-        'volume_zscore_10', 'obv'
+        'volume_zscore_10'
     ]
     
     # Features that should be min-max scaled to [0, 1]
@@ -48,7 +47,16 @@ def normalize_features(df: pd.DataFrame) -> pd.DataFrame:
     ]
     
     # Features that should be kept in their original range
-    original_range_features = ['rsi_14']  # RSI is already 0-100
+    original_range_features = [
+        'rsi_14', 'rsi_14_lag1',  # RSI is already 0-100
+        'obv', 'obv_lag1',  # OBV should be kept in original range
+        'macd_hist', 'macd_hist_lag1',  # MACD histogram should be kept in original range
+        'log_return_1', 'log_return_1_lag1',  # Log returns should be kept in original range
+        'log_return_5',  # Log returns should be kept in original range
+        # Regime flags should be kept in their original range (0, 1, or 0-2)
+        'is_trending', 'high_volatility', 'low_volatility',
+        'is_ranging', 'price_above_bb_mid', 'rsi_regime'
+    ]
     
     # Apply z-score normalization
     if zscore_features:
@@ -113,15 +121,64 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
         df["volume_zscore_10"] = (df["volume"] - df["volume"].rolling(10).mean()) / df["volume"].rolling(10).std()
         df["obv"] = OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"]).on_balance_volume()
         
-        # Clean
-        df = df.dropna().reset_index(drop=True)
+        # --- Add Lagged Features ---
+        df["rsi_14_lag1"] = df["rsi_14"].shift(1)
+        df["macd_hist_lag1"] = df["macd_hist"].shift(1)
+        df["log_return_1_lag1"] = df["log_return_1"].shift(1)
+        df["obv_lag1"] = df["obv"].shift(1)
+        
+        # Clean NaN values before calculating regime flags
+        df = df.fillna(method='ffill').fillna(method='bfill')
+        
+        # --- Regime Flags ---
+        # 1. Trend Regime (EMA crossover)
+        df["is_trending"] = (df["ema_8"] > df["ema_21"]).astype(int)
+        
+        # 2. Volatility Regime (ATR % thresholds)
+        atr_q75 = df["atr_pct"].quantile(0.75)
+        atr_q25 = df["atr_pct"].quantile(0.25)
+        df["high_volatility"] = (df["atr_pct"] > atr_q75).astype(int)
+        df["low_volatility"] = (df["atr_pct"] < atr_q25).astype(int)
+        
+        # 3. Ranging Market (Narrow Bollinger Band width)
+        bb_q25 = df["bb_width"].quantile(0.25)
+        df["is_ranging"] = (df["bb_width"] < bb_q25).astype(int)
+        
+        # 4. Price above Bollinger Middle Band
+        df["bb_mavg"] = (df["bb_b"] - 0.5)  # Approximates middle position
+        df["price_above_bb_mid"] = (df["bb_mavg"] > 0).astype(int)
+        
+        # 5. RSI Regime
+        # Fill NaN values with 50 (neutral) before creating regimes
+        df["rsi_14"] = df["rsi_14"].fillna(50)
+        df["rsi_regime"] = pd.cut(df["rsi_14"], bins=[0, 30, 70, 100], labels=[0, 1, 2]).astype(int)
         
         # Replace infinite values with NaN and then forward fill
         df = df.replace([np.inf, -np.inf], np.nan)
         df = df.fillna(method='ffill').fillna(method='bfill')
         
+        # Store original values before normalization
+        original_values = {
+            'rsi_14': df['rsi_14'].copy(),
+            'rsi_14_lag1': df['rsi_14_lag1'].copy(),
+            'obv': df['obv'].copy(),
+            'obv_lag1': df['obv_lag1'].copy(),
+            'macd_hist': df['macd_hist'].copy(),
+            'macd_hist_lag1': df['macd_hist_lag1'].copy(),
+            'log_return_1': df['log_return_1'].copy(),
+            'log_return_1_lag1': df['log_return_1_lag1'].copy(),
+            'log_return_5': df['log_return_5'].copy()
+        }
+        
         # Normalize features
         df = normalize_features(df)
+        
+        # Restore original values
+        for key, value in original_values.items():
+            df[key] = value
+        
+        # Drop intermediate calculation columns
+        df.drop(columns=["bb_mavg"], inplace=True)
         
         return df
         

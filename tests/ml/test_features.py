@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import pytest
 from ml.features.feature_engineering import generate_features
+from ta.trend import EMAIndicator
 
 @pytest.fixture
 def sample_ohlcv_data():
@@ -35,7 +36,12 @@ def test_feature_generation(sample_ohlcv_data):
         'atr_14', 'atr_pct', 'high_low_pct',
         'momentum_10', 'rate_of_change_5',
         'log_return_1', 'log_return_5',
-        'volume_zscore_10', 'obv'
+        'volume_zscore_10', 'obv',
+        # Add lagged features to required features
+        'rsi_14_lag1', 'macd_hist_lag1', 'log_return_1_lag1', 'obv_lag1',
+        # Regime flags
+        'is_trending', 'high_volatility', 'low_volatility',
+        'is_ranging', 'price_above_bb_mid', 'rsi_regime'
     ]
     
     for feature in required_features:
@@ -54,11 +60,10 @@ def test_feature_generation(sample_ohlcv_data):
     # Check z-score normalized features
     zscore_features = [
         'ema_8', 'ema_21', 'ema_ratio',
-        'macd_line', 'macd_signal', 'macd_hist',
+        'macd_line', 'macd_signal',
         'bb_width', 'bb_zscore',
         'momentum_10', 'rate_of_change_5',
-        'log_return_1', 'log_return_5',
-        'volume_zscore_10', 'obv'
+        'volume_zscore_10'
     ]
     for col in zscore_features:
         assert abs(df[col].mean()) < 0.1, f"Feature {col} mean is too far from 0"
@@ -96,4 +101,70 @@ def test_data_continuity(sample_ohlcv_data):
     
     # Check that no data points were lost
     assert len(df) > 0, "No data points in processed DataFrame"
-    assert len(df) <= len(sample_ohlcv_data), "Processed DataFrame has more rows than input" 
+    assert len(df) <= len(sample_ohlcv_data), "Processed DataFrame has more rows than input"
+
+def test_lagged_features(sample_ohlcv_data):
+    """Test that lagged features are generated correctly."""
+    df = generate_features(sample_ohlcv_data)
+    
+    # Check presence of lagged features
+    lagged_features = ["rsi_14_lag1", "macd_hist_lag1", "log_return_1_lag1", "obv_lag1"]
+    for feature in lagged_features:
+        assert feature in df.columns, f"Missing lagged feature: {feature}"
+        assert df[feature].isnull().sum() == 0, f"{feature} contains NaNs"
+    
+    # Check that lagged features are properly shifted
+    for i in range(1, len(df)):
+        # For non-normalized features, check exact matches
+        assert abs(df['rsi_14_lag1'].iloc[i] - df['rsi_14'].iloc[i-1]) < 1e-10, "RSI lag not properly shifted"
+        assert abs(df['obv_lag1'].iloc[i] - df['obv'].iloc[i-1]) < 1e-10, "OBV lag not properly shifted"
+        assert abs(df['macd_hist_lag1'].iloc[i] - df['macd_hist'].iloc[i-1]) < 1e-10, "MACD hist lag not properly shifted"
+        assert abs(df['log_return_1_lag1'].iloc[i] - df['log_return_1'].iloc[i-1]) < 1e-10, "Log return lag not properly shifted"
+
+def test_regime_flags():
+    """Test regime flag generation"""
+    # Create sample data
+    dates = pd.date_range(start='2023-01-01', periods=100, freq='H')
+    df = pd.DataFrame({
+        'timestamp': dates,
+        'open': np.random.randn(100).cumsum() + 100,
+        'high': np.random.randn(100).cumsum() + 101,
+        'low': np.random.randn(100).cumsum() + 99,
+        'close': np.random.randn(100).cumsum() + 100,
+        'volume': np.random.randint(1000, 10000, 100)
+    })
+    
+    # Generate features
+    df_features = generate_features(df)
+    
+    # Test binary flags
+    binary_flags = ['is_trending', 'high_volatility', 'low_volatility', 'is_ranging', 'price_above_bb_mid']
+    for flag in binary_flags:
+        assert df_features[flag].isin([0, 1]).all(), f"Flag {flag} contains values other than 0 or 1"
+    
+    # Test RSI regime
+    assert df_features['rsi_regime'].isin([0, 1, 2]).all(), "RSI regime contains values other than 0, 1, or 2"
+    
+    # Test trend flag logic
+    # Calculate EMAs and handle NaN values
+    ema_8 = EMAIndicator(df["close"], window=8).ema_indicator()
+    ema_21 = EMAIndicator(df["close"], window=21).ema_indicator()
+    ema_8 = ema_8.fillna(method='ffill').fillna(method='bfill')
+    ema_21 = ema_21.fillna(method='ffill').fillna(method='bfill')
+    
+    for i in range(len(df_features)):
+        if df_features['is_trending'].iloc[i] == 1:
+            assert ema_8.iloc[i] > ema_21.iloc[i], "Trend flag logic incorrect"
+        else:
+            assert ema_8.iloc[i] <= ema_21.iloc[i], "Trend flag logic incorrect"
+    
+    # Test RSI regime boundaries
+    for i in range(len(df_features)):
+        rsi = df_features['rsi_14'].iloc[i]
+        regime = df_features['rsi_regime'].iloc[i]
+        if rsi <= 30:
+            assert regime == 0, "RSI regime 0 boundary incorrect"
+        elif rsi >= 70:
+            assert regime == 2, "RSI regime 2 boundary incorrect"
+        else:
+            assert regime == 1, "RSI regime 1 boundary incorrect" 
