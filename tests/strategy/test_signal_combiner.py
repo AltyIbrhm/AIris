@@ -9,6 +9,7 @@ from strategy.base import BaseStrategy
 class MockStrategy(BaseStrategy):
     """Mock strategy for testing."""
     def __init__(self, action: str, confidence: float = 1.0):
+        super().__init__({'name': 'mock_strategy'})
         self.action = action
         self.confidence = confidence
 
@@ -33,7 +34,9 @@ def signal_combiner():
     """Create a signal combiner instance."""
     return SignalCombiner({
         'strategy_weights': {},
-        'hold_threshold': 0.05  # Lower threshold to make weighted signals test pass
+        'hold_threshold': 0.05,  # Lower threshold to make weighted signals test pass
+        'min_confidence': 0.3,
+        'conflict_threshold': 0.2
     })
 
 def test_combine_buy_signals(signal_combiner, market_data):
@@ -48,7 +51,7 @@ def test_combine_buy_signals(signal_combiner, market_data):
 
 def test_combine_conflicting_signals(signal_combiner, market_data):
     """Test combining conflicting signals (buy + sell)."""
-    # Add conflicting strategies
+    # Add conflicting strategies with equal weights and similar confidence
     signal_combiner.add_strategy(MockStrategy('buy', 0.8), weight=1.0)
     signal_combiner.add_strategy(MockStrategy('sell', 0.9), weight=1.0)
     
@@ -81,4 +84,47 @@ def test_zero_weights(signal_combiner, market_data):
     signal = signal_combiner.generate_signal(market_data)
     assert signal['action'] == 'hold'
     assert 'error' in signal
-    assert signal['error'] == 'Total weight is zero' 
+    assert signal['error'] == 'Total weight is zero'
+
+def test_low_confidence_signals(signal_combiner, market_data):
+    """Test that low confidence signals are filtered out."""
+    signal_combiner.add_strategy(MockStrategy('buy', 0.2), weight=1.0)  # Below min_confidence
+    signal_combiner.add_strategy(MockStrategy('sell', 0.9), weight=1.0)
+    
+    signal = signal_combiner.generate_signal(market_data)
+    assert signal['action'] == 'sell'  # Only high confidence signal should be considered
+    assert signal['confidence'] > 0.0
+
+def test_similar_weight_conflict(signal_combiner, market_data):
+    """Test conflict detection with similar weights."""
+    # Add strategies with similar weights but slightly different
+    signal_combiner.add_strategy(MockStrategy('buy', 0.8), weight=1.1)
+    signal_combiner.add_strategy(MockStrategy('sell', 0.8), weight=0.9)
+    
+    signal = signal_combiner.generate_signal(market_data)
+    assert signal['action'] == 'hold'  # Should detect conflict due to similar weights
+    assert signal['confidence'] == 0.0
+
+def test_clear_winner_despite_conflict(signal_combiner, market_data):
+    """Test that strong signals can overcome weight similarity."""
+    # Add strategies with similar weights but very different confidence
+    signal_combiner.add_strategy(MockStrategy('buy', 0.9), weight=1.1)
+    signal_combiner.add_strategy(MockStrategy('sell', 0.4), weight=0.9)
+    
+    signal = signal_combiner.generate_signal(market_data)
+    assert signal['action'] == 'buy'  # Strong buy should win despite similar weights
+    assert signal['confidence'] > 0.0
+
+def test_error_handling(signal_combiner, market_data):
+    """Test error handling in signal generation."""
+    class ErrorStrategy(BaseStrategy):
+        def __init__(self):
+            super().__init__({'name': 'error_strategy'})
+            
+        def generate_signal(self, market_data):
+            raise Exception("Test error")
+    
+    signal_combiner.add_strategy(ErrorStrategy())
+    signal = signal_combiner.generate_signal(market_data)
+    assert signal['action'] == 'hold'
+    assert signal['confidence'] == 0.0 

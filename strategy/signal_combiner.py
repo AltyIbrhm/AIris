@@ -12,6 +12,8 @@ class SignalCombiner(BaseStrategy):
         self.strategies = []
         self.strategy_weights = []  # Store weights alongside strategies
         self.hold_threshold = config.get('hold_threshold', 0.1)  # Threshold for considering signals as conflicting
+        self.min_confidence = config.get('min_confidence', 0.3)  # Minimum confidence required for a signal
+        self.conflict_threshold = config.get('conflict_threshold', 0.2)  # Threshold for detecting conflicting signals
         self.logger = logging.getLogger(__name__)
 
     def add_strategy(self, strategy: BaseStrategy, weight: float = 1.0):
@@ -22,12 +24,7 @@ class SignalCombiner(BaseStrategy):
     def generate_signal(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         """Combine signals from all strategies into a single signal."""
         if not self.strategies:
-            return {
-                'action': 'hold',
-                'price': market_data['close'][-1],
-                'timestamp': market_data['timestamp'][-1],
-                'error': 'No strategies configured'
-            }
+            return self._create_hold_signal(market_data, error='No strategies configured')
 
         # Initialize signal collection
         buy_signals = []
@@ -37,39 +34,39 @@ class SignalCombiner(BaseStrategy):
 
         # Collect signals and check for errors
         for strategy, weight in zip(self.strategies, self.strategy_weights):
-            signal = strategy.generate_signal(market_data)
-            
-            # Check for errors
-            if 'error' in signal:
-                errors.append(signal['error'])
-                continue
+            try:
+                signal = strategy.generate_signal(market_data)
                 
-            confidence = signal.get('confidence', 1.0)
-            
-            if signal['action'] == 'buy':
-                buy_signals.append((weight, confidence))
-                self.logger.debug(f"Added buy signal: weight={weight}, confidence={confidence}")
-            elif signal['action'] == 'sell':
-                sell_signals.append((weight, confidence))
-                self.logger.debug(f"Added sell signal: weight={weight}, confidence={confidence}")
-            
-            total_weight += weight
+                # Check for errors
+                if 'error' in signal:
+                    errors.append(signal['error'])
+                    continue
+                    
+                confidence = signal.get('confidence', 1.0)
+                
+                # Skip signals with low confidence
+                if confidence < self.min_confidence:
+                    self.logger.debug(f"Skipping low confidence signal: {confidence} < {self.min_confidence}")
+                    continue
+                    
+                if signal['action'] == 'buy':
+                    buy_signals.append((weight, confidence))
+                    self.logger.debug(f"Added buy signal: weight={weight}, confidence={confidence}")
+                elif signal['action'] == 'sell':
+                    sell_signals.append((weight, confidence))
+                    self.logger.debug(f"Added sell signal: weight={weight}, confidence={confidence}")
+                
+                total_weight += weight
+            except Exception as e:
+                errors.append(str(e))
+                self.logger.error(f"Error getting signal from strategy: {str(e)}", exc_info=True)
+                continue
 
         if errors:
-            return {
-                'action': 'hold',
-                'price': market_data['close'][-1],
-                'timestamp': market_data['timestamp'][-1],
-                'error': '; '.join(errors)
-            }
+            return self._create_hold_signal(market_data, error='; '.join(errors))
 
         if total_weight == 0:
-            return {
-                'action': 'hold',
-                'price': market_data['close'][-1],
-                'timestamp': market_data['timestamp'][-1],
-                'error': 'Total weight is zero'
-            }
+            return self._create_hold_signal(market_data, error='Total weight is zero')
 
         # Calculate weighted signals
         buy_weight = sum(w for w, _ in buy_signals)
@@ -80,24 +77,12 @@ class SignalCombiner(BaseStrategy):
         self.logger.debug(f"Buy weight: {buy_weight}, Sell weight: {sell_weight}")
         self.logger.debug(f"Buy signal: {buy_signal}, Sell signal: {sell_signal}")
 
-        # For equal weights, use the hold threshold
-        if abs(buy_weight - sell_weight) < 1e-6:
-            self.logger.debug("Equal weights detected")
-            if abs(buy_signal - sell_signal) < self.hold_threshold * total_weight:
-                action = 'hold'
-                confidence = 0.0
-            else:
-                action = 'buy' if buy_signal > sell_signal else 'sell'
-                confidence = abs(buy_signal - sell_signal) / total_weight
-        else:
-            self.logger.debug("Unequal weights detected")
-            # For unequal weights, higher weight wins
-            if buy_weight > sell_weight:
-                action = 'buy'
-                confidence = buy_signal / total_weight
-            else:
-                action = 'sell'
-                confidence = sell_signal / total_weight
+        # Enhanced edge case handling
+        action, confidence = self._resolve_signal_conflict(
+            buy_weight, sell_weight,
+            buy_signal, sell_signal,
+            total_weight
+        )
 
         self.logger.debug(f"Final decision: action={action}, confidence={confidence}")
 
@@ -111,6 +96,80 @@ class SignalCombiner(BaseStrategy):
                 'sell_weight': sell_weight,
                 'buy_signal': buy_signal,
                 'sell_signal': sell_signal,
-                'total_weight': total_weight
+                'total_weight': total_weight,
+                'conflict_threshold': self.conflict_threshold,
+                'min_confidence': self.min_confidence
             }
-        } 
+        }
+
+    def _resolve_signal_conflict(
+        self,
+        buy_weight: float,
+        sell_weight: float,
+        buy_signal: float,
+        sell_signal: float,
+        total_weight: float
+    ) -> tuple[str, float]:
+        """
+        Resolve conflicts between buy and sell signals.
+        
+        Args:
+            buy_weight: Total weight of buy signals
+            sell_weight: Total weight of sell signals
+            buy_signal: Weighted sum of buy signals
+            sell_signal: Weighted sum of sell signals
+            total_weight: Total weight of all signals
+            
+        Returns:
+            Tuple of (action, confidence)
+        """
+        # Case 1: Equal weights - use signal strength comparison
+        if abs(buy_weight - sell_weight) < 1e-6:
+            self.logger.debug("Equal weights detected")
+            signal_diff = abs(buy_signal - sell_signal)
+            
+            # If signals are too close, hold
+            if signal_diff < self.hold_threshold * total_weight:
+                return 'hold', 0.0
+                
+            # If signals are conflicting but clear winner
+            if signal_diff < self.conflict_threshold * total_weight:
+                self.logger.warning("Conflicting signals detected, but clear winner")
+                
+            action = 'buy' if buy_signal > sell_signal else 'sell'
+            confidence = signal_diff / total_weight
+            return action, confidence
+
+        # Case 2: Unequal weights but potential conflict
+        stronger_weight = max(buy_weight, sell_weight)
+        weaker_weight = min(buy_weight, sell_weight)
+        weight_ratio = weaker_weight / stronger_weight
+        
+        # If weights are close enough, check for conflicts
+        if weight_ratio > (1 - self.conflict_threshold):
+            stronger_signal = max(buy_signal, sell_signal)
+            weaker_signal = min(buy_signal, sell_signal)
+            signal_ratio = weaker_signal / stronger_signal if stronger_signal > 0 else 0
+            
+            # If signals are too close relative to their weights, hold
+            if signal_ratio > (1 - self.conflict_threshold):
+                self.logger.warning("Conflicting signals with similar strength detected")
+                return 'hold', 0.0
+
+        # Case 3: Clear winner based on weight
+        if buy_weight > sell_weight:
+            return 'buy', buy_signal / total_weight
+        else:
+            return 'sell', sell_signal / total_weight
+
+    def _create_hold_signal(self, market_data: Dict[str, Any], error: str = None) -> Dict[str, Any]:
+        """Create a hold signal with optional error message."""
+        signal = {
+            'action': 'hold',
+            'price': market_data['close'][-1],
+            'timestamp': market_data['timestamp'][-1],
+            'confidence': 0.0
+        }
+        if error:
+            signal['error'] = error
+        return signal 
