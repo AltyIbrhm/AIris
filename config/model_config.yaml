@@ -1,0 +1,12 @@
+features_path: ml/data/processed/BTCUSDT_5m_features.csv
+labels_path: ml/data/processed/BTCUSDT_5m_labels.csv
+seq_len: 60
+batch_size: 128
+epochs: 20
+lr: 0.001
+hidden_dim: 128
+num_layers: 2
+dropout: 0.3
+class_weights: [1.5, 1.0, 1.5]  # SELL, HOLD, BUY
+val_split: 0.2
+save_path: ml/models/checkpoints/lstm_btcusdt.pth 
