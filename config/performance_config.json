@@ -1,0 +1,21 @@
+{
+    "log_dir": "logs",
+    "export_interval": 3600,
+    "export_formats": ["csv", "json"],
+    "metrics": {
+        "track_win_rate": true,
+        "track_pnl": true,
+        "track_drawdown": true,
+        "track_duration": true,
+        "track_daily_summary": true
+    },
+    "csv_settings": {
+        "include_timestamp": true,
+        "include_symbol": true,
+        "include_global": true
+    },
+    "json_settings": {
+        "pretty_print": true,
+        "include_trades": false
+    }
+} 
