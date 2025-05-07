@@ -212,7 +212,7 @@ def test_get_current_stops():
     stops = em.get_current_stops()
     assert "trailing_stop" in stops
     assert "hard_stop" in stops
-    assert abs(stops["trailing_stop"] - entry_price * (1 - 0.005)) < 0.001  # Initial trailing stop below entry
+    assert abs(stops["trailing_stop"] - entry_price) < 0.001  # Initial trailing stop at entry
     assert stops["hard_stop"] < entry_price  # Hard stop below entry for long
     
     # Move price up to activate trailing
@@ -227,7 +227,7 @@ def test_get_current_stops():
     # Get updated stops
     stops = em.get_current_stops()
     assert stops["trailing_stop"] < current_price  # Trailing stop should be below current price
-    assert stops["trailing_stop"] > entry_price  # But above entry price
+    assert stops["trailing_stop"] >= entry_price  # Should not trail below entry price for long positions
     assert stops["hard_stop"] < entry_price  # Hard stop stays fixed
 
 def test_string_representation():

@@ -2,13 +2,15 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import matplotlib.pyplot as plt
 from datetime import datetime
 import yaml
 import torch
 from ml.data.dataset_builder import TimeSeriesDataset
 from ml.models.lstm_model import LSTMClassifier
+import json
+from ml.evaluation.performance_tracker import PerformanceTracker
 
 # Configure logging
 logging.basicConfig(
@@ -21,34 +23,39 @@ class PnLSimulator:
     def __init__(
         self,
         initial_balance: float = 10000.0,
-        position_size: float = 0.02,  # Reduced to 2% of balance per trade
-        atr_multiplier: float = 1.2,  # Tightened ATR multiplier for SL/TP
-        max_holding_periods: int = 24,  # Maximum holding periods (hours)
-        min_holding_periods: int = 3,   # Minimum holding periods (bars)
-        confidence_threshold: float = 0.85,  # Increased confidence threshold
-        max_loss_pct: float = 0.01,  # 1% maximum loss per trade
-        ema_fast: int = 8,  # Fast EMA period
-        ema_slow: int = 21,  # Slow EMA period
-        rsi_period: int = 14,  # RSI period
-        rsi_overbought: int = 70,  # RSI overbought threshold
-        rsi_oversold: int = 30,  # RSI oversold threshold
-        trailing_stop_activation: float = 0.5,  # Activate trailing stop at 50% of target
-        trailing_stop_distance: float = 0.8  # 80% of ATR for trailing stop
+        position_size: float = None,  # Will be loaded from config
+        atr_multiplier: float = None,  # Will be loaded from config
+        max_holding_periods: int = None,  # Will be loaded from config
+        min_holding_periods: int = 3,
+        confidence_threshold: float = None,  # Will be loaded from config
+        max_loss_pct: float = None,  # Will be loaded from config
+        ema_fast: int = 8,
+        ema_slow: int = 21,
+        rsi_period: int = 14,
+        rsi_overbought: int = 70,
+        rsi_oversold: int = 30,
+        trailing_stop_activation: float = None,  # Will be loaded from config
+        trailing_stop_distance: float = None  # Will be loaded from config
     ):
+        # Load risk config
+        with open("config/risk_config.json", "r") as f:
+            risk_config = json.load(f)
+            
+        # Initialize with config values or defaults
         self.initial_balance = initial_balance
-        self.position_size = position_size
-        self.atr_multiplier = atr_multiplier
-        self.max_holding_periods = max_holding_periods
+        self.position_size = position_size or float(risk_config.get('max_position_size_percent', 0.02))
+        self.atr_multiplier = atr_multiplier or float(risk_config.get('atr_multiplier', 1.2))
+        self.max_holding_periods = max_holding_periods or int(risk_config.get('max_holding_time', 24))
         self.min_holding_periods = min_holding_periods
-        self.confidence_threshold = confidence_threshold
-        self.max_loss_pct = max_loss_pct
+        self.confidence_threshold = confidence_threshold or float(risk_config.get('min_confidence', 0.85))
+        self.max_loss_pct = max_loss_pct or float(risk_config.get('max_loss_pct', 0.01))
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
         self.rsi_period = rsi_period
         self.rsi_overbought = rsi_overbought
         self.rsi_oversold = rsi_oversold
-        self.trailing_stop_activation = trailing_stop_activation
-        self.trailing_stop_distance = trailing_stop_distance
+        self.trailing_stop_activation = trailing_stop_activation or float(risk_config.get('trailing_stop_activation', 0.5))
+        self.trailing_stop_distance = trailing_stop_distance or float(risk_config.get('trailing_stop_distance', 0.8))
         
         # Performance tracking
         self.balance_history = [initial_balance]
@@ -196,9 +203,8 @@ class PnLSimulator:
     
     def execute_trade(
         self,
-        signal: int,
+        signal: Dict[str, Any],  # Changed from int to Dict
         price: float,
-        confidence: float,
         high: float,
         low: float,
         close: float,
@@ -208,9 +214,11 @@ class PnLSimulator:
         Execute a trade based on the signal and current market conditions
         
         Args:
-            signal (int): Trading signal (0: SELL, 1: HOLD, 2: BUY)
+            signal (Dict[str, Any]): Trading signal dictionary containing:
+                - action: str ("buy", "sell", or "hold")
+                - confidence: float (model confidence)
+                - price: float (signal price)
             price (float): Current market price
-            confidence (float): Model's confidence in prediction
             high (float): Current bar's high price
             low (float): Current bar's low price
             close (float): Current bar's close price
@@ -250,11 +258,14 @@ class PnLSimulator:
                 return
         
         # Only open new position if confidence meets threshold
-        if confidence < self.confidence_threshold:
+        if signal['confidence'] < self.confidence_threshold:
             return
             
+        # Convert signal action to internal format
+        signal_type = 2 if signal['action'] == 'buy' else 0 if signal['action'] == 'sell' else 1
+            
         # Check if signal aligns with trend and RSI
-        if not self.is_trend_aligned(signal) or not self.is_rsi_aligned(signal):
+        if not self.is_trend_aligned(signal_type) or not self.is_rsi_aligned(signal_type):
             return
             
         # Calculate ATR for position sizing and stop placement
@@ -263,7 +274,7 @@ class PnLSimulator:
             return
             
         # Open new position based on signal
-        if signal == 2 and not self.current_position:  # BUY
+        if signal['action'] == 'buy' and not self.current_position:
             stop_loss = price - (atr * self.atr_multiplier)
             take_profit = price + (atr * self.atr_multiplier * 2)  # 2:1 reward-risk
             
@@ -278,7 +289,7 @@ class PnLSimulator:
                 'entry_time': timestamp
             }
             
-        elif signal == 0 and not self.current_position:  # SELL
+        elif signal['action'] == 'sell' and not self.current_position:
             stop_loss = price + (atr * self.atr_multiplier)
             take_profit = price - (atr * self.atr_multiplier * 2)  # 2:1 reward-risk
             
@@ -411,13 +422,15 @@ def main():
     config = load_config()
     logger.info("Configuration loaded successfully")
     
-    # Initialize dataset
+    # Initialize dataset and performance tracker
     logger.info("Loading test dataset...")
     dataset = TimeSeriesDataset(
         features_path=config["features_path"],
         labels_path=config["labels_path"],
         seq_len=config["seq_len"]
     )
+    
+    performance_tracker = PerformanceTracker(config)
     
     # Load model
     logger.info("Loading trained model...")
@@ -434,23 +447,8 @@ def main():
     model.eval()
     logger.info("Model loaded successfully")
     
-    # Initialize simulator with improved risk parameters and filters
-    simulator = PnLSimulator(
-        initial_balance=10000.0,
-        position_size=0.02,  # 2% position size
-        atr_multiplier=1.2,  # Tighter ATR multiplier
-        max_holding_periods=24,
-        min_holding_periods=3,  # Minimum 3 bars holding
-        confidence_threshold=0.85,  # Higher confidence threshold
-        max_loss_pct=0.01,  # 1% max loss per trade
-        ema_fast=8,  # Fast EMA period
-        ema_slow=21,  # Slow EMA period
-        rsi_period=14,  # RSI period
-        rsi_overbought=70,  # RSI overbought threshold
-        rsi_oversold=30,  # RSI oversold threshold
-        trailing_stop_activation=0.5,  # Activate trailing stop at 50% of target
-        trailing_stop_distance=0.8  # 80% of ATR for trailing stop
-    )
+    # Initialize simulator
+    simulator = PnLSimulator()
     
     # Run simulation
     logger.info("Starting PnL simulation...")
@@ -471,33 +469,54 @@ def main():
             close = features[0, -1, 3].item()  # Assuming fourth feature is close
             
             # Execute trade
+            signal = {
+                'action': 'buy' if prediction.item() == 2 else 'sell' if prediction.item() == 0 else 'hold',
+                'confidence': confidence.item(),
+                'price': price,
+                'symbol': 'BTCUSDT'  # Add symbol for performance tracking
+            }
+            
             simulator.execute_trade(
-                prediction.item(),
+                signal,
                 price,
-                confidence.item(),
                 high,
                 low,
                 close,
                 dataset.timestamps[i]
             )
+            
+            # Update performance metrics
+            if simulator.trades and simulator.trades[-1]['exit_time'] == dataset.timestamps[i]:
+                last_trade = simulator.trades[-1]
+                performance_tracker.update_metrics(
+                    symbol=signal['symbol'],
+                    trade_result={
+                        'entry_price': last_trade['entry_price'],
+                        'exit_price': last_trade['exit_price'],
+                        'entry_time': last_trade['entry_time'],
+                        'exit_time': last_trade['exit_time'],
+                        'pnl': last_trade['pnl'],
+                        'exit_reason': last_trade['exit_reason'],
+                        'position_size': last_trade['size']
+                    }
+                )
     
-    # Calculate and log metrics
-    metrics = simulator.calculate_metrics()
+    # Calculate and log metrics using performance tracker
+    metrics = performance_tracker.get_metrics('BTCUSDT')
     logger.info("\n📊 Trading Performance Metrics:")
     for key, value in metrics.items():
-        if key != 'exit_reasons':
-            logger.info(f"{key}: {value:.2f}")
-    logger.info("\nExit Reasons Distribution:")
-    for reason, count in metrics['exit_reasons'].items():
-        logger.info(f"{reason}: {count}")
+        logger.info(f"{key}: {value}")
     
     # Plot results
     simulator.plot_results()
     
     # Save trade history
     trades_df = pd.DataFrame(simulator.trades)
-    trades_df.to_csv(figures_dir / "trade_history.csv", index=False)
-    logger.info(f"Trade history saved to {figures_dir}/trade_history.csv")
+    trades_df.to_csv(Path("ml/evaluation/figures/trade_history.csv"), index=False)
+    logger.info(f"Trade history saved to ml/evaluation/figures/trade_history.csv")
+    
+    # Export performance metrics
+    performance_tracker.export_metrics()
 
 def simulate_trading(predictions: np.ndarray, probabilities: np.ndarray, prices: pd.DataFrame) -> Dict:
     """
@@ -537,6 +556,10 @@ def simulate_trading(predictions: np.ndarray, probabilities: np.ndarray, prices:
                 'close': prices[:, 2]
             })
     
+    # Ensure we have a datetime index
+    if not isinstance(prices.index, pd.DatetimeIndex):
+        prices.index = pd.date_range(start='2023-01-01', periods=len(prices), freq='1H')
+    
     # Run simulation for each prediction
     for i, (pred, prob) in enumerate(zip(predictions, probabilities)):
         if i >= len(prices):
@@ -544,12 +567,17 @@ def simulate_trading(predictions: np.ndarray, probabilities: np.ndarray, prices:
             
         price_data = prices.iloc[i]
         simulator.execute_trade(
-            signal=pred,
-            price=price_data['close'],
-            confidence=np.max(prob),
-            high=price_data['high'],
-            low=price_data['low'],
-            close=price_data['close']
+            {
+                'action': 'buy' if pred == 2 else 'sell' if pred == 0 else 'hold',
+                'confidence': np.max(prob),
+                'price': price_data['close'],
+                'symbol': 'BTCUSDT'
+            },
+            price_data['close'],
+            price_data['high'],
+            price_data['low'],
+            price_data['close'],
+            prices.index[i].to_pydatetime()  # Convert pandas timestamp to datetime
         )
     
     # Generate plots

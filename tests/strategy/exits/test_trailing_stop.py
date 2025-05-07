@@ -267,19 +267,29 @@ def test_position_size_adjustment():
     ts.initialize_trade(entry_price=100.0, side="BUY", position_size=2.0)
     
     # Move price up to activate trailing
-    current_price = 101.0  # 1% profit
+    current_price = 105.0  # 5% profit, enough to ensure trail is above entry
     exit_signal, trail_price, exit_reason = ts.update_trail(
         current_price=current_price,
-        high_prices=[100, 101],
-        low_prices=[99, 100],
-        close_prices=[99.5, 101]
+        high_prices=[100, 102, 104, 105],
+        low_prices=[99, 101, 103, 104],
+        close_prices=[99.5, 101.5, 103.5, 105]
     )
     
     # Calculate expected trail distance
-    atr = ts.calculate_atr([100, 101], [99, 100], [99.5, 101])
-    expected_trail = current_price - (atr * ts.trail_distance_atr_mult * ts.position_size_mult)
+    atr = ts.calculate_atr([100, 102, 104, 105], [99, 101, 103, 104], [99.5, 101.5, 103.5, 105])
+    trail_distance = atr * ts.trail_distance_atr_mult * ts.position_size_mult
+    expected_trail = current_price - trail_distance
     
-    assert abs(trail_price - expected_trail) < 0.001  # Trail should be adjusted for position size
+    # Trail price should be at expected trail since it's well above entry price
+    assert abs(trail_price - expected_trail) < 0.001
+    
+    # Verify trail is above entry price
+    assert trail_price > ts.entry_price
+    
+    # Verify trail distance is doubled due to position size multiplier
+    standard_trail_distance = atr * ts.trail_distance_atr_mult
+    actual_trail_distance = current_price - trail_price
+    assert abs(actual_trail_distance - (2.0 * standard_trail_distance)) < 0.001
 
 def test_exit_reasons():
     """Test different exit reasons are properly reported"""

@@ -88,11 +88,7 @@ class TrailingStop:
         self.entry_price = entry_price
         self.position_side = side
         self.trailing_active = False
-        # Set initial trail price based on position side
-        if side == "BUY":
-            self.trail_price = entry_price * (1 - self.min_profit_threshold)  # Below entry for longs
-        else:  # SELL
-            self.trail_price = entry_price * (1 + self.min_profit_threshold)  # Above entry for shorts
+        self.trail_price = entry_price  # Initialize at entry price
         self.entry_time = datetime.now()
         self.position_size = position_size
         
@@ -180,28 +176,26 @@ class TrailingStop:
         if not self.trailing_active and profit_pct >= activation_profit:
             self.trailing_active = True
             if self.position_side == "BUY":
-                # Set initial trail price to ensure it's above entry if price has moved up significantly
-                self.trail_price = max(
-                    self.entry_price * (1 + self.min_profit_threshold),
-                    current_price - trail_distance
-                )
-            else:
-                # Set initial trail price to ensure it's below entry if price has moved down significantly
-                self.trail_price = min(
-                    self.entry_price * (1 - self.min_profit_threshold),
-                    current_price + trail_distance
-                )
+                # Set initial trail price to current price minus trail distance
+                # But ensure it's not below entry price
+                self.trail_price = max(current_price - trail_distance, self.entry_price)
+            else:  # SELL
+                # Set initial trail price to current price plus trail distance
+                # But ensure it's not above entry price
+                self.trail_price = min(current_price + trail_distance, self.entry_price)
                 
         # Update trail price if active
         if self.trailing_active:
             if self.position_side == "BUY":
                 new_trail = current_price - trail_distance
-                self.trail_price = max(self.trail_price, new_trail)
+                # Ensure trail price is not below entry price
+                self.trail_price = max(self.trail_price, new_trail, self.entry_price)
                 if current_price < self.trail_price:
                     return True, self.trail_price, "trail_hit"
             else:  # SELL
                 new_trail = current_price + trail_distance
-                self.trail_price = min(self.trail_price, new_trail)
+                # Ensure trail price is not above entry price
+                self.trail_price = min(self.trail_price, new_trail, self.entry_price)
                 if current_price > self.trail_price:
                     return True, self.trail_price, "trail_hit"
                 
