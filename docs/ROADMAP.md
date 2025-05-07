@@ -107,12 +107,14 @@
     - [ ] Volume standard deviation
     - [ ] Volume ratio analysis
 
-- [ ] Label Generation
-  - [ ] Implement dynamic thresholding
-  - [ ] Add ATR-based labeling
-  - [ ] Create BUY/SELL/HOLD classification
-  - [ ] Implement minimum holding period
-  - [ ] Add label validation
+- [x] Label Generation ✅
+  - [x] Implement dynamic thresholding using ATR
+  - [x] Create BUY/SELL/HOLD classification
+  - [x] Add label balancing (max 40% per class)
+  - [x] Implement future returns calculation
+  - [x] Add comprehensive test suite
+  - [x] Create label statistics tracking
+  - [x] Implement batch processing for all symbols
 
 ### Step 2: Model Design
 - [ ] Architecture Selection

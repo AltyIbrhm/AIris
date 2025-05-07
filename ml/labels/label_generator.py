@@ -55,6 +55,18 @@ def generate_labels(
         Tuple[pd.DataFrame, dict]: DataFrame with labels and label statistics
     """
     try:
+        # Input validation
+        if future_bars <= 0:
+            raise ValueError("future_bars must be positive")
+        if atr_window <= 0:
+            raise ValueError("atr_window must be positive")
+        if atr_multiplier <= 0:
+            raise ValueError("atr_multiplier must be positive")
+        
+        required_columns = ['high', 'low', 'close']
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError(f"DataFrame must contain columns: {required_columns}")
+            
         df = df.copy()
         
         # Calculate ATR
@@ -62,7 +74,8 @@ def generate_labels(
             high=df['high'],
             low=df['low'],
             close=df['close'],
-            window=atr_window
+            window=atr_window,
+            fillna=True
         ).average_true_range()
         
         # Calculate ATR percentage
@@ -73,8 +86,35 @@ def generate_labels(
         
         # Generate labels based on ATR thresholds
         df['label'] = 0  # Default to HOLD
-        df.loc[future_return > atr_multiplier * atr_pct, 'label'] = 1  # BUY
-        df.loc[future_return < -atr_multiplier * atr_pct, 'label'] = -1  # SELL
+        threshold = atr_multiplier * atr_pct
+        
+        # Ensure thresholds are properly applied
+        # First mark the strong moves
+        df.loc[future_return > threshold, 'label'] = 1  # BUY
+        df.loc[future_return < -threshold, 'label'] = -1  # SELL
+        
+        # Then explicitly mark the HOLD regions
+        df.loc[(future_return >= -threshold) & (future_return <= threshold), 'label'] = 0
+        
+        # Add label text for easier interpretation
+        df['label_text'] = df['label'].map(LABEL_MAP)
+        
+        # Drop the last future_bars rows since we can't calculate their labels
+        df = df.iloc[:-future_bars].copy()
+        
+        # Balance the labels if needed
+        label_counts = df['label'].value_counts()
+        max_samples = int(len(df) * 0.4)  # Maximum 40% for any class
+        
+        for label in [1, -1]:
+            if label in label_counts and label_counts[label] > max_samples:
+                # Find indices where label is present
+                label_indices = df[df['label'] == label].index
+                # Randomly select excess samples to convert to HOLD
+                excess_samples = label_counts[label] - max_samples
+                convert_indices = np.random.choice(label_indices, size=excess_samples, replace=False)
+                df.loc[convert_indices, 'label'] = 0
+                df.loc[convert_indices, 'label_text'] = 'HOLD'
         
         # Calculate label statistics
         label_stats = {
@@ -86,12 +126,6 @@ def generate_labels(
             'sell_ratio': (df['label'] == -1).mean(),
             'hold_ratio': (df['label'] == 0).mean()
         }
-        
-        # Add label text for easier interpretation
-        df['label_text'] = df['label'].map(LABEL_MAP)
-        
-        # Drop rows with NaN values (last future_bars rows)
-        df = df.dropna()
         
         return df, label_stats
         
