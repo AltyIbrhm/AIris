@@ -23,7 +23,8 @@ setup(
         "ccxt>=4.0.0",
         "websockets>=11.0.0",
         "aiohttp>=3.8.0",
-        "python-binance>=1.0.0"
+        "python-binance>=1.0.0",
+        "torch>=2.1.0"
     ],
     python_requires=">=3.8",
 ) 
