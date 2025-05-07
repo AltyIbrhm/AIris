@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
 from datetime import datetime
 import yaml
@@ -198,86 +198,100 @@ class PnLSimulator:
         self,
         signal: int,
         price: float,
-        timestamp: datetime,
         confidence: float,
         high: float,
         low: float,
-        close: float
+        close: float,
+        timestamp: Optional[datetime] = None
     ) -> None:
-        """Execute a trade based on signal and confidence"""
-        # Update price history for indicators
+        """
+        Execute a trade based on the signal and current market conditions
+        
+        Args:
+            signal (int): Trading signal (0: SELL, 1: HOLD, 2: BUY)
+            price (float): Current market price
+            confidence (float): Model's confidence in prediction
+            high (float): Current bar's high price
+            low (float): Current bar's low price
+            close (float): Current bar's close price
+            timestamp (Optional[datetime]): Current timestamp (default: current time)
+        """
+        # Use current time if timestamp not provided
+        timestamp = timestamp or datetime.now()
+        
+        # Update technical indicators
         self.update_price_history(high, low, close)
         
-        # Skip if confidence is too low
+        # Check if we should close existing position
+        if self.current_position:
+            # Update trailing stop if active
+            atr = self.calculate_atr()
+            self.update_trailing_stop(price, atr)
+            
+            # Check stop conditions
+            stop_hit = price <= self.current_position['stop_loss'] if self.current_position['type'] == 'BUY' \
+                else price >= self.current_position['stop_loss']
+                
+            take_profit_hit = price >= self.current_position['take_profit'] if self.current_position['type'] == 'BUY' \
+                else price <= self.current_position['take_profit']
+                
+            # Close position if any exit condition is met
+            if stop_hit:
+                self.close_position(price, timestamp, "stop_loss")
+                return
+            elif take_profit_hit:
+                self.close_position(price, timestamp, "take_profit")
+                return
+                
+            # Check time-based exit
+            holding_time = timestamp - self.current_position['entry_time']
+            if holding_time.total_seconds() / 3600 >= self.max_holding_periods:
+                self.close_position(price, timestamp, "time_exit")
+                return
+        
+        # Only open new position if confidence meets threshold
         if confidence < self.confidence_threshold:
             return
             
-        # Skip HOLD signals
-        if signal == 1:
+        # Check if signal aligns with trend and RSI
+        if not self.is_trend_aligned(signal) or not self.is_rsi_aligned(signal):
             return
             
-        # Check trend alignment
-        if not self.is_trend_aligned(signal):
-            return
-            
-        # Check RSI alignment
-        if not self.is_rsi_aligned(signal):
-            return
-            
+        # Calculate ATR for position sizing and stop placement
         atr = self.calculate_atr()
         if atr == 0:
             return
             
-        if self.current_position is None:  # No position, can enter
+        # Open new position based on signal
+        if signal == 2 and not self.current_position:  # BUY
+            stop_loss = price - (atr * self.atr_multiplier)
+            take_profit = price + (atr * self.atr_multiplier * 2)  # 2:1 reward-risk
+            
             position_size = self.calculate_position_size(self.balance_history[-1], price, atr)
-            if position_size == 0:
-                return
-                
-            stop_loss = price - (atr * self.atr_multiplier) if signal == 0 else price + (atr * self.atr_multiplier)
-            take_profit = price + (atr * self.atr_multiplier) if signal == 0 else price - (atr * self.atr_multiplier)
             
             self.current_position = {
-                'type': 'SELL' if signal == 0 else 'BUY',
+                'type': 'BUY',
                 'entry_price': price,
-                'position_size': position_size,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
-                'entry_time': timestamp,
-                'entry_balance': self.balance_history[-1],
-                'holding_bars': 0,  # Track minimum holding period
-                'entry_trend': 'uptrend' if self.ema_fast_values[-1] > self.ema_slow_values[-1] else 'downtrend',
-                'entry_rsi': self.rsi_values[-1] if self.rsi_values else None
+                'size': position_size,
+                'entry_time': timestamp
             }
             
-        else:  # Have position, check exit conditions
-            # Update holding period
-            self.current_position['holding_bars'] += 1
+        elif signal == 0 and not self.current_position:  # SELL
+            stop_loss = price + (atr * self.atr_multiplier)
+            take_profit = price - (atr * self.atr_multiplier * 2)  # 2:1 reward-risk
             
-            # Update trailing stop if conditions are met
-            self.update_trailing_stop(price, atr)
+            position_size = self.calculate_position_size(self.balance_history[-1], price, atr)
             
-            # Calculate current PnL
-            current_pnl = (price - self.current_position['entry_price']) * self.current_position['position_size']
-            if self.current_position['type'] == 'BUY':
-                current_pnl = -current_pnl
-                
-            # Check maximum loss limit
-            max_loss = self.balance_history[-1] * self.max_loss_pct
-            if current_pnl < -max_loss:
-                self.close_position(price, timestamp, 'max_loss')
-                return
-                
-            # Skip exit checks if minimum holding period not met
-            if self.current_position['holding_bars'] < self.min_holding_periods:
-                return
-                
-            # Check stop loss and take profit
-            if (self.current_position['type'] == 'SELL' and price >= self.current_position['stop_loss']) or \
-               (self.current_position['type'] == 'BUY' and price <= self.current_position['stop_loss']):
-                self.close_position(price, timestamp, 'stop_loss')
-            elif (self.current_position['type'] == 'SELL' and price <= self.current_position['take_profit']) or \
-                 (self.current_position['type'] == 'BUY' and price >= self.current_position['take_profit']):
-                self.close_position(price, timestamp, 'take_profit')
+            self.current_position = {
+                'type': 'SELL',
+                'entry_price': price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'size': position_size,
+                'entry_time': timestamp
+            }
     
     def close_position(self, price: float, timestamp: datetime, reason: str) -> None:
         """Close current position and record trade"""
@@ -285,7 +299,7 @@ class PnLSimulator:
             return
             
         holding_periods = (timestamp - self.current_position['entry_time']).total_seconds() / 3600  # Convert to hours
-        pnl = (price - self.current_position['entry_price']) * self.current_position['position_size']
+        pnl = (price - self.current_position['entry_price']) * self.current_position['size']
         if self.current_position['type'] == 'BUY':
             pnl = -pnl
             
@@ -311,96 +325,81 @@ class PnLSimulator:
         self.current_position = None
     
     def calculate_metrics(self) -> Dict:
-        """Calculate trading performance metrics"""
+        """
+        Calculate trading performance metrics
+        
+        Returns:
+            Dict: Dictionary containing performance metrics
+        """
         if not self.trades:
-            return {}
+            return {
+                "total_trades": 0,
+                "win_rate": 0.0,
+                "equity_curve": self.balance_history,
+                "max_drawdown": 0.0,
+                "profit_factor": 0.0,
+                "sharpe_ratio": 0.0
+            }
             
-        trades_df = pd.DataFrame(self.trades)
+        # Calculate basic metrics
+        total_trades = len(self.trades)
+        winning_trades = len([t for t in self.trades if t['pnl'] > 0])
+        win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
         
-        # Basic metrics
-        total_trades = len(trades_df)
-        winning_trades = len(trades_df[trades_df['pnl'] > 0])
-        losing_trades = len(trades_df[trades_df['pnl'] <= 0])
+        # Calculate profit metrics
+        gross_profit = sum([t['pnl'] for t in self.trades if t['pnl'] > 0])
+        gross_loss = abs(sum([t['pnl'] for t in self.trades if t['pnl'] < 0]))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
         
-        # PnL metrics
-        total_pnl = trades_df['pnl'].sum()
-        avg_win = trades_df[trades_df['pnl'] > 0]['pnl'].mean() if winning_trades > 0 else 0
-        avg_loss = trades_df[trades_df['pnl'] <= 0]['pnl'].mean() if losing_trades > 0 else 0
-        
-        # Risk metrics
-        max_drawdown = 0
+        # Calculate drawdown
         peak = self.initial_balance
+        max_drawdown = 0.0
         for balance in self.balance_history:
             if balance > peak:
                 peak = balance
             drawdown = (peak - balance) / peak
             max_drawdown = max(max_drawdown, drawdown)
-        
-        # Calculate Sharpe Ratio (assuming risk-free rate of 0)
-        returns = pd.Series(self.balance_history).pct_change().dropna()
-        sharpe_ratio = np.sqrt(252) * returns.mean() / returns.std() if len(returns) > 0 else 0
-        
-        # Additional metrics
-        avg_holding_period = trades_df['holding_periods'].mean()
-        exit_reasons = trades_df['exit_reason'].value_counts().to_dict()
-        
-        # Trend analysis
-        trend_aligned_trades = len(trades_df[trades_df['entry_trend'] == trades_df['exit_trend']])
-        trend_alignment_rate = trend_aligned_trades / total_trades if total_trades > 0 else 0
-        
-        # RSI analysis
-        rsi_aligned_trades = len(trades_df[
-            ((trades_df['type'] == 'BUY') & (trades_df['entry_rsi'] < self.rsi_oversold)) |
-            ((trades_df['type'] == 'SELL') & (trades_df['entry_rsi'] > self.rsi_overbought))
-        ])
-        rsi_alignment_rate = rsi_aligned_trades / total_trades if total_trades > 0 else 0
+            
+        # Calculate Sharpe ratio (assuming risk-free rate of 0)
+        returns = np.diff(self.balance_history) / self.balance_history[:-1]
+        sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if len(returns) > 0 else 0.0
         
         return {
-            'total_trades': total_trades,
-            'winning_trades': winning_trades,
-            'losing_trades': losing_trades,
-            'win_rate': winning_trades / total_trades if total_trades > 0 else 0,
-            'total_pnl': total_pnl,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': abs(avg_win / avg_loss) if avg_loss != 0 else float('inf'),
-            'max_drawdown': max_drawdown,
-            'sharpe_ratio': sharpe_ratio,
-            'final_balance': self.balance_history[-1],
-            'return_pct': (self.balance_history[-1] - self.initial_balance) / self.initial_balance * 100,
-            'avg_holding_period': avg_holding_period,
-            'exit_reasons': exit_reasons,
-            'trend_alignment_rate': trend_alignment_rate,
-            'rsi_alignment_rate': rsi_alignment_rate
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "equity_curve": self.balance_history,
+            "max_drawdown": max_drawdown,
+            "profit_factor": profit_factor,
+            "sharpe_ratio": sharpe_ratio
         }
     
-    def plot_results(self, save_path: Path) -> None:
-        """Plot equity curve and drawdown"""
-        plt.figure(figsize=(15, 10))
+    def plot_results(self) -> None:
+        """Generate performance plots"""
+        # Create figures directory if it doesn't exist
+        figures_dir = Path("ml/evaluation/figures")
+        figures_dir.mkdir(parents=True, exist_ok=True)
         
-        # Equity curve
-        plt.subplot(2, 1, 1)
-        plt.plot(self.balance_history, label='Equity Curve')
-        plt.title('Equity Curve')
-        plt.xlabel('Trade Number')
-        plt.ylabel('Balance')
+        # Plot equity curve
+        plt.figure(figsize=(12, 6))
+        plt.plot(self.balance_history)
+        plt.title("Equity Curve")
+        plt.xlabel("Trade Number")
+        plt.ylabel("Account Balance")
         plt.grid(True)
-        plt.legend()
-        
-        # Drawdown
-        plt.subplot(2, 1, 2)
-        peak = pd.Series(self.balance_history).expanding().max()
-        drawdown = (peak - self.balance_history) / peak * 100
-        plt.plot(drawdown, label='Drawdown %')
-        plt.title('Drawdown')
-        plt.xlabel('Trade Number')
-        plt.ylabel('Drawdown %')
-        plt.grid(True)
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(save_path)
+        plt.savefig(figures_dir / "equity_curve.png")
         plt.close()
+        
+        # Plot profit distribution if there are trades
+        if self.trades:
+            profits = [trade['pnl'] for trade in self.trades]
+            plt.figure(figsize=(12, 6))
+            plt.hist(profits, bins=50)
+            plt.title("Profit Distribution")
+            plt.xlabel("Profit/Loss")
+            plt.ylabel("Frequency")
+            plt.grid(True)
+            plt.savefig(figures_dir / "profit_distribution.png")
+            plt.close()
 
 def load_config() -> Dict:
     """Load model configuration"""
@@ -475,11 +474,11 @@ def main():
             simulator.execute_trade(
                 prediction.item(),
                 price,
-                dataset.timestamps[i],
                 confidence.item(),
                 high,
                 low,
-                close
+                close,
+                dataset.timestamps[i]
             )
     
     # Calculate and log metrics
@@ -493,15 +492,71 @@ def main():
         logger.info(f"{reason}: {count}")
     
     # Plot results
-    output_dir = Path("ml/evaluation/figures")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    simulator.plot_results(output_dir / "pnl_simulation.png")
-    logger.info(f"Results plotted and saved to {output_dir}/pnl_simulation.png")
+    simulator.plot_results()
     
     # Save trade history
     trades_df = pd.DataFrame(simulator.trades)
-    trades_df.to_csv(output_dir / "trade_history.csv", index=False)
-    logger.info(f"Trade history saved to {output_dir}/trade_history.csv")
+    trades_df.to_csv(figures_dir / "trade_history.csv", index=False)
+    logger.info(f"Trade history saved to {figures_dir}/trade_history.csv")
+
+def simulate_trading(predictions: np.ndarray, probabilities: np.ndarray, prices: pd.DataFrame) -> Dict:
+    """
+    Simulate trading based on model predictions and probabilities
+    
+    Args:
+        predictions (np.ndarray): Model predictions (0: SELL, 1: HOLD, 2: BUY)
+        probabilities (np.ndarray): Prediction probabilities for each class
+        prices (pd.DataFrame): Price data with high, low, close columns
+        
+    Returns:
+        Dict: Simulation metrics including:
+            - total_trades: Number of trades executed
+            - win_rate: Percentage of winning trades
+            - equity_curve: List of account balance values
+            - max_drawdown: Maximum drawdown percentage
+            - profit_factor: Gross profit / Gross loss
+            - sharpe_ratio: Risk-adjusted return metric
+    """
+    # Initialize simulator with default settings
+    simulator = PnLSimulator()
+    
+    # Convert prices to DataFrame if it's a numpy array
+    if isinstance(prices, np.ndarray):
+        if len(prices.shape) == 1 or prices.shape[1] == 1:
+            # If 1D array or single column, use same values for high, low, close
+            prices = pd.DataFrame({
+                'high': prices.flatten(),
+                'low': prices.flatten(),
+                'close': prices.flatten()
+            })
+        else:
+            # If 2D array, assume columns are high, low, close
+            prices = pd.DataFrame({
+                'high': prices[:, 0],
+                'low': prices[:, 1],
+                'close': prices[:, 2]
+            })
+    
+    # Run simulation for each prediction
+    for i, (pred, prob) in enumerate(zip(predictions, probabilities)):
+        if i >= len(prices):
+            break
+            
+        price_data = prices.iloc[i]
+        simulator.execute_trade(
+            signal=pred,
+            price=price_data['close'],
+            confidence=np.max(prob),
+            high=price_data['high'],
+            low=price_data['low'],
+            close=price_data['close']
+        )
+    
+    # Generate plots
+    simulator.plot_results()
+        
+    # Calculate and return metrics
+    return simulator.calculate_metrics()
 
 if __name__ == "__main__":
     main() 
