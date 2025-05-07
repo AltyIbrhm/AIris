@@ -1,14 +1,17 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, WeightedRandomSampler
 from ml.data.dataset_builder import TimeSeriesDataset
 from ml.models.lstm_model import LSTMClassifier
 import yaml
 import os
 import logging
 from typing import Dict, Any
-from sklearn.metrics import f1_score, confusion_matrix
+from sklearn.metrics import f1_score, confusion_matrix, classification_report
 import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -79,6 +82,69 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float
     
     return metrics
 
+def plot_training_metrics(train_losses, val_losses, train_accs, val_accs, save_dir):
+    """Plot training metrics."""
+    plt.figure(figsize=(12, 5))
+    
+    # Plot losses
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    
+    # Plot accuracies
+    plt.subplot(1, 2, 2)
+    plt.plot(train_accs, label='Train Accuracy')
+    plt.plot(val_accs, label='Val Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'training_metrics.png')
+    plt.close()
+
+def analyze_hold_misclassifications(y_true: np.ndarray, y_pred: np.ndarray, features: np.ndarray, indices: np.ndarray) -> None:
+    """
+    Analyze misclassified HOLD samples to understand patterns.
+    
+    Args:
+        y_true: True labels
+        y_pred: Predicted labels
+        features: Feature matrix
+        indices: Sample indices
+    """
+    # Create DataFrame for analysis
+    hold_analysis = pd.DataFrame({
+        'index': indices,
+        'true_label': y_true,
+        'predicted_label': y_pred,
+        'is_hold': y_true == 1,
+        'is_misclassified': (y_true == 1) & (y_pred != 1)
+    })
+    
+    # Calculate statistics for misclassified HOLD samples
+    logger.info("\n=== HOLD Misclassification Analysis ===")
+    logger.info(f"Total HOLD samples: {len(hold_analysis[hold_analysis['is_hold']])}")
+    logger.info(f"Misclassified HOLD samples: {len(hold_analysis[hold_analysis['is_misclassified']])}")
+    
+    # Analyze where HOLD is being confused
+    confusion_counts = hold_analysis[hold_analysis['is_misclassified']]['predicted_label'].value_counts()
+    logger.info("\nHOLD misclassified as:")
+    for label, count in confusion_counts.items():
+        percentage = count / len(hold_analysis[hold_analysis['is_misclassified']]) * 100
+        logger.info(f"Class {label}: {count} samples ({percentage:.1f}%)")
+    
+    # Save detailed analysis to CSV
+    output_path = Path("ml/evaluation/hold_analysis")
+    output_path.mkdir(parents=True, exist_ok=True)
+    hold_analysis.to_csv(output_path / "hold_misclassifications.csv", index=False)
+    logger.info(f"\nDetailed analysis saved to {output_path}/hold_misclassifications.csv")
+
 def train_model() -> None:
     """
     Main training function that handles:
@@ -87,15 +153,19 @@ def train_model() -> None:
     - Training loop with validation
     - Model checkpointing
     """
-    # Load configuration
-    config = load_config()
-    logger.info("Configuration loaded successfully")
-    
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
-
     try:
+        # Load configuration
+        config = load_config()
+        logger.info("Configuration loaded successfully")
+
+        # Create output directory
+        output_dir = Path("ml/train/figures")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Set device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+
         # Initialize dataset
         dataset = TimeSeriesDataset(
             features_path=config["features_path"],
@@ -110,23 +180,27 @@ def train_model() -> None:
         print_dataset_stats(dataset)
 
         # Split dataset
-        val_size = int(len(dataset) * config["val_split"])
-        train_size = len(dataset) - val_size
-        train_ds, val_ds = random_split(dataset, [train_size, val_size])
-        logger.info(f"Train size: {train_size}, Validation size: {val_size}")
-
-        # Create dataloaders
+        train_size = int(len(dataset) * (1 - config["val_split"]))
+        val_size = len(dataset) - train_size
+        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+        
+        # Calculate class weights for sampler using only training data
+        train_labels = [dataset.labels["label"].iloc[idx] for idx in train_dataset.indices]
+        class_sample_count = np.array([np.sum(np.array(train_labels) == t) for t in [0, 1, 2]])
+        weights = 1. / class_sample_count
+        samples_weight = np.array([weights[t] for t in train_labels])
+        sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
+        
+        # Create data loaders
         train_loader = DataLoader(
-            train_ds,
+            train_dataset,
             batch_size=config["batch_size"],
-            shuffle=True,
-            num_workers=0  # Adjust based on system
+            sampler=sampler
         )
         val_loader = DataLoader(
-            val_ds,
+            val_dataset,
             batch_size=config["batch_size"],
-            shuffle=False,
-            num_workers=0  # Adjust based on system
+            shuffle=False
         )
 
         # Initialize model
@@ -143,13 +217,26 @@ def train_model() -> None:
         class_weights = torch.tensor(config["class_weights"], dtype=torch.float32).to(device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
         
+        # Learning rate scheduler
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=config["lr_factor"],
+            patience=config["lr_patience"],
+            min_lr=config["min_lr"]
+        )
+        
         # Create checkpoint directory
         os.makedirs(os.path.dirname(config["save_path"]), exist_ok=True)
         
         # Training loop
         best_val_loss = float("inf")
-        early_stopping_patience = 5
-        early_stopping_counter = 0
+        patience = 5
+        patience_counter = 0
+        train_losses = []
+        val_losses = []
+        train_accs = []
+        val_accs = []
         
         logger.info("Starting training...")
         for epoch in range(config["epochs"]):
@@ -169,6 +256,13 @@ def train_model() -> None:
                 loss = criterion(logits, y)
                 
                 loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=config["gradient_clip"]
+                )
+                
                 optimizer.step()
                 
                 total_loss += loss.item()
@@ -187,7 +281,8 @@ def train_model() -> None:
 
             avg_train_loss = total_loss / len(train_loader)
             train_accuracy = 100 * correct_train / total_train
-            train_metrics = calculate_metrics(np.array(train_true), np.array(train_preds))
+            train_losses.append(avg_train_loss)
+            train_accs.append(train_accuracy)
 
             # Validation phase
             model.eval()
@@ -196,6 +291,7 @@ def train_model() -> None:
             total_val = 0
             val_preds = []
             val_true = []
+            val_features = []
             
             with torch.no_grad():
                 for X, y in val_loader:
@@ -207,34 +303,51 @@ def train_model() -> None:
                     total_val += y.size(0)
                     correct_val += (predicted == y).sum().item()
                     
-                    # Store predictions for metrics
+                    # Store predictions and features for analysis
                     val_preds.extend(predicted.cpu().numpy())
                     val_true.extend(y.cpu().numpy())
+                    val_features.extend(X.cpu().numpy())
 
             avg_val_loss = val_loss / len(val_loader)
             val_accuracy = 100 * correct_val / total_val
-            val_metrics = calculate_metrics(np.array(val_true), np.array(val_preds))
+            val_losses.append(avg_val_loss)
+            val_accs.append(val_accuracy)
+
+            # Update learning rate
+            scheduler.step(avg_val_loss)
 
             # Logging
             logger.info(
                 f"[Epoch {epoch+1}/{config['epochs']}] "
                 f"Train Loss: {avg_train_loss:.4f} | "
                 f"Train Acc: {train_accuracy:.2f}% | "
-                f"Train F1: {train_metrics['f1']:.4f} | "
                 f"Val Loss: {avg_val_loss:.4f} | "
-                f"Val Acc: {val_accuracy:.2f}% | "
-                f"Val F1: {val_metrics['f1']:.4f}"
+                f"Val Acc: {val_accuracy:.2f}%"
             )
             
-            # Log per-class validation accuracy
-            logger.info("Validation Class Accuracies:")
-            for i in range(3):  # Assuming 3 classes (SELL, HOLD, BUY)
-                logger.info(f"Class {i}: {val_metrics[f'class_{i}_accuracy']:.2%}")
+            # Print classification report for validation set
+            report = classification_report(
+                val_true,
+                val_preds,
+                target_names=["SELL", "HOLD", "BUY"],
+                digits=3
+            )
+            logger.info("\nValidation Classification Report:")
+            logger.info(report)
+
+            # Analyze HOLD misclassifications
+            if epoch % 5 == 0:  # Analyze every 5 epochs
+                analyze_hold_misclassifications(
+                    np.array(val_true),
+                    np.array(val_preds),
+                    np.array(val_features),
+                    np.array(range(len(val_true)))  # Using indices instead of timestamps
+                )
 
             # Model checkpointing
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                early_stopping_counter = 0
+                patience_counter = 0
                 
                 # Save model
                 torch.save({
@@ -242,19 +355,25 @@ def train_model() -> None:
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_loss': best_val_loss,
-                    'val_metrics': val_metrics,
-                    'config': config
                 }, config["save_path"])
                 
                 logger.info(f"✅ New best model saved: {config['save_path']}")
             else:
-                early_stopping_counter += 1
+                patience_counter += 1
                 
             # Early stopping check
-            if early_stopping_counter >= early_stopping_patience:
+            if patience_counter >= patience:
                 logger.info(f"Early stopping triggered after {epoch+1} epochs")
                 break
 
+        # Plot training metrics
+        plot_training_metrics(
+            train_losses,
+            val_losses,
+            train_accs,
+            val_accs,
+            output_dir
+        )
         logger.info("✅ Training complete.")
         logger.info(f"Best validation loss: {best_val_loss:.4f}")
         

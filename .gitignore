@@ -65,4 +65,8 @@ Thumbs.db
 # Ignore backup files
 ml/features/*_base.py
 ml/features/*_v2_lagged.py
-ml/features/*_v3_regime.py 
+ml/features/*_v3_regime.py
+
+# Model checkpoints
+ml/models/checkpoints/
+*.pth 

@@ -3,6 +3,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
@@ -86,7 +88,12 @@ def evaluate():
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found at {model_path}")
         
-        model.load_state_dict(torch.load(model_path))
+        # Load model with weights_only=False for backward compatibility
+        checkpoint = torch.load(model_path, weights_only=False)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            model.load_state_dict(checkpoint)
         model.eval()
         logger.info("Model loaded successfully")
 
