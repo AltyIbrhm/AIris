@@ -100,8 +100,8 @@ def test_log_rotation():
 
 def test_invalid_log_dir():
     """Test logger creation with invalid directory."""
-    # Use a path that is guaranteed to be invalid on Windows
-    invalid_dir = "Z:\\invalid\\path\\that\\does\\not\\exist"
+    # Use a path that is guaranteed to be invalid on both Windows and Linux
+    invalid_dir = "/invalid/path/that/does/not/exist"
     with pytest.raises(OSError):
         setup_logger("test_logger", invalid_dir)
 
