@@ -1,0 +1,45 @@
+exchange: binance
+symbols:
+  - ETH/USDT
+  - BTC/USDT
+  - SOL/USDT
+interval: 5m
+poll_interval: 10
+paper_trading: true
+log_level: INFO
+
+risk_config:
+  min_confidence: 0.3
+  max_open_positions_total: 3
+  max_open_positions_per_symbol: 1
+  max_drawdown_percent: 10.0
+  max_daily_loss: 300.0
+  default_sl_percent: 2.0
+  default_tp_percent: 4.0
+  duplicate_signal_block_minutes: 5
+  max_position_size_percent: 10.0
+  max_leverage: 1.0
+  risk_free_rate: 0.02
+  volatility_lookback: 20
+  position_sizing_method: kelly
+  emergency_stop_loss_percent: 5.0
+
+ai_model_config:
+  model_type: lstm
+  input_features:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - rsi
+    - macd
+    - bollinger_bands
+  output_features:
+    - direction
+    - confidence
+  sequence_length: 100
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 100
+  validation_split: 0.2 

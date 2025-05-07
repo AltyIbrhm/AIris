@@ -1,94 +1,117 @@
 """
-Core trading loop implementation.
+Trading loop implementation.
 """
 import asyncio
 import logging
-from typing import Optional
+from typing import Dict, Any, List
+from datetime import datetime
+from config.schema import load_config
+from data.fetcher import DataFetcher
+from core.router import SignalRouter
+from core.evaluator import SignalEvaluator
+from core.executor import SignalExecutor
+from risk.checker import RiskManager
+from utils.portfolio import PortfolioTracker
+from config.schema import Config
 
-from config.config_schema import Config
-from core.interfaces import MarketDataFetcher, SignalRouter, RiskManager, PaperTradingEngine
-
-logger = logging.getLogger("airis")
+logger = logging.getLogger(__name__)
 
 class TradingLoop:
-    """Main trading loop that orchestrates all components."""
+    """Main trading loop implementation."""
     
-    def __init__(self, config: Config):
-        """Initialize the trading loop with configuration."""
-        self.config = config
-        self.market_data: Optional[MarketDataFetcher] = None
-        self.signal_router: Optional[SignalRouter] = None
-        self.risk_manager: Optional[RiskManager] = None
-        self.trading_engine: Optional[PaperTradingEngine] = None
-        self.is_running = False
+    def __init__(self, config: str | Dict[str, Any]):
+        """Initialize trading loop with configuration."""
+        if isinstance(config, str):
+            self.config = load_config(config)
+        else:
+            self.config = Config.parse_obj(config).trading
+        self.fetcher = DataFetcher(self.config.exchange)
+        self.router = SignalRouter()
+        self.evaluator = SignalEvaluator()
+        self.portfolio = PortfolioTracker()
+        self.risk_manager = RiskManager('config/risk_config.json', self.portfolio)
+        self.executor = SignalExecutor(self.config.paper_trading)
         
-    async def initialize(self):
-        """Initialize all components."""
-        logger.info("Initializing trading components...")
-        
-        # Initialize components (to be implemented)
-        # self.market_data = MarketDataFetcher(self.config)
-        # self.signal_router = SignalRouter(self.config)
-        # self.risk_manager = RiskManager(self.config)
-        # self.trading_engine = PaperTradingEngine(self.config)
-        
-        logger.info("Trading components initialized")
-    
     async def run(self):
-        """Run the main trading loop."""
-        if not all([self.market_data, self.signal_router, 
-                   self.risk_manager, self.trading_engine]):
-            raise RuntimeError("Trading components not initialized")
+        """Run the trading loop."""
+        logger.info("Starting trading loop...")
         
-        self.is_running = True
-        logger.info("Starting trading loop")
-        
-        try:
-            while self.is_running:
-                # 1. Fetch latest market data
-                market_data = await self.market_data.fetch_latest()
-                
-                # 2. Get signals from strategies
-                signals = await self.signal_router.get_signals(market_data)
-                
-                # 3. Apply risk filters
-                filtered_signals = await self.risk_manager.filter_signals(signals)
-                
-                # 4. Execute trades
-                if filtered_signals:
-                    await self.trading_engine.execute_signals(filtered_signals)
-                
-                # 5. Log results
-                self._log_iteration(market_data, signals, filtered_signals)
-                
+        while True:
+            try:
+                # Process each symbol independently
+                for symbol in self.config.symbols:
+                    await self._process_symbol(symbol)
+                    
                 # Wait for next iteration
-                await asyncio.sleep(self.config.trading.interval)
+                await asyncio.sleep(self.config.poll_interval)
+                
+            except Exception as e:
+                logger.error(f"Error in trading loop: {str(e)}")
+                await asyncio.sleep(5)  # Wait before retrying
+                
+    async def _process_symbol(self, symbol: str):
+        """Process a single symbol."""
+        try:
+            # Fetch latest candle
+            candle = await self.fetcher.fetch_latest_candle(symbol)
+            if not candle:
+                logger.warning(f"No candle data for {symbol}")
+                return
+                
+            # Route signal
+            signal = await self.router.route(symbol, candle)
+            if not signal:
+                return
+                
+            # Evaluate signal
+            if not await self.evaluator.evaluate(signal):
+                return
+                
+            # Check risk parameters
+            if not self.risk_manager.check(signal):
+                return
+                
+            # Calculate position size
+            position_size = self.risk_manager.get_position_size(signal)
+            
+            # Execute trade
+            await self.executor.execute(signal, position_size)
+            
+            # Update portfolio
+            if signal['direction'] == 'long':
+                self.portfolio.open_position(
+                    symbol=symbol,
+                    entry_price=signal['price'],
+                    size=position_size,
+                    direction='long',
+                    stop_loss=signal['stop_loss'],
+                    take_profit=signal['take_profit']
+                )
+            else:  # short
+                self.portfolio.open_position(
+                    symbol=symbol,
+                    entry_price=signal['price'],
+                    size=position_size,
+                    direction='short',
+                    stop_loss=signal['stop_loss'],
+                    take_profit=signal['take_profit']
+                )
                 
         except Exception as e:
-            logger.error(f"Error in trading loop: {str(e)}", exc_info=True)
-            raise
-        finally:
-            self.is_running = False
-            logger.info("Trading loop stopped")
-    
-    def stop(self):
+            logger.error(f"Error processing {symbol}: {str(e)}")
+            
+    async def stop(self):
         """Stop the trading loop."""
-        self.is_running = False
         logger.info("Stopping trading loop...")
-    
-    def _log_iteration(self, market_data, signals, filtered_signals):
-        """Log the results of a trading loop iteration."""
-        logger.debug(f"Market data: {market_data}")
-        logger.debug(f"Generated signals: {len(signals)}")
-        logger.debug(f"Filtered signals: {len(filtered_signals)}")
-
-async def run_trading_loop(config: Config):
-    """
-    Run the main trading loop.
-    
-    Args:
-        config: System configuration
-    """
-    loop = TradingLoop(config)
-    await loop.initialize()
-    await loop.run() 
+        await self.fetcher.close()
+        await self.executor.close()
+        
+def run_trading_loop(config_path: str):
+    """Run the trading loop with given configuration."""
+    loop = TradingLoop(config_path)
+    try:
+        asyncio.run(loop.run())
+    except KeyboardInterrupt:
+        logger.info("Received stop signal")
+    finally:
+        asyncio.run(loop.stop()) 

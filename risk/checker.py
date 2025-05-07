@@ -8,29 +8,58 @@ import logging
 import os
 from utils.portfolio import PortfolioTracker
 
+logger = logging.getLogger(__name__)
+
 class RiskManager:
     def __init__(self, config_path: str, portfolio_tracker: PortfolioTracker):
         """Initialize risk manager with configuration and portfolio tracker."""
         self.portfolio = portfolio_tracker
         self.logger = logging.getLogger(__name__)
-        self.config_loaded = False
         self.config = self._load_config(config_path)
-        self.last_signals: Dict[str, Dict[str, Any]] = {}
+        self.config_loaded = self.config is not None
+        self.last_long_signals: Dict[str, Dict[str, Any]] = {}
+        self.last_short_signals: Dict[str, Dict[str, Any]] = {}
+        self.last_long_signal_time: Dict[str, datetime] = {}
+        self.last_short_signal_time: Dict[str, datetime] = {}
 
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
+    def _load_config(self, config_path: str) -> Optional[Dict[str, Any]]:
         """Load risk configuration from file."""
         try:
+            if not os.path.exists(config_path):
+                self.logger.warning(f"Config file {config_path} not found")
+                return None
+
             with open(config_path, 'r') as f:
                 config = json.load(f)
                 if 'default' not in config:
-                    self.logger.error("No default configuration found in risk config")
-                    return {}
-                self.config_loaded = True
+                    self.logger.warning("No default configuration found")
+                    return None
                 return config
         except Exception as e:
-            self.logger.error(f"Error loading risk config: {str(e)}")
-            self.config_loaded = False
-            return {}
+            self.logger.warning(f"Error loading risk config: {str(e)}")
+            return None
+
+    def _get_default_config(self) -> Dict[str, Any]:
+        """Get default risk configuration."""
+        self.config_loaded = False
+        return {
+            'default': {
+                'min_confidence': 0.3,
+                'max_open_positions_total': 3,
+                'max_open_positions_per_symbol': 1,
+                'max_drawdown_percent': 10.0,
+                'max_daily_loss': 300.0,
+                'default_sl_percent': 2.0,
+                'default_tp_percent': 4.0,
+                'duplicate_signal_block_minutes': 5,
+                'max_position_size_percent': 10.0,
+                'max_leverage': 1.0,
+                'risk_free_rate': 0.02,
+                'volatility_lookback': 20,
+                'position_sizing_method': 'kelly',
+                'emergency_stop_loss_percent': 5.0
+            }
+        }
 
     def _get_strategy_config(self, strategy_name: str) -> Dict[str, Any]:
         """Get configuration for specific strategy, falling back to defaults."""
@@ -44,63 +73,56 @@ class RiskManager:
         return {**default_config, **strategy_config}
 
     def check(self, signal: Dict[str, Any]) -> bool:
-        """
-        Check if a trade signal complies with risk parameters.
-        Returns True if the trade is allowed, False otherwise.
-        """
+        """Check if signal passes risk management rules."""
         try:
-            # Reject all signals if config failed to load
             if not self.config_loaded:
-                self.logger.error("Risk config not loaded, rejecting signal")
+                self.logger.warning("Risk config not loaded, rejecting signal")
                 return False
 
-            # Get strategy-specific config
-            strategy_name = signal.get('strategy', '')
-            strategy_config = self._get_strategy_config(strategy_name)
-            
-            if not strategy_config:
-                self.logger.error(f"No configuration found for strategy: {strategy_name}")
-                return False
-
-            # Basic signal validation
             if not self._validate_signal(signal):
                 return False
 
-            # Check confidence threshold
+            strategy_config = self._get_strategy_config(signal.get('strategy', 'default'))
+            
+            # Check confidence
             if not self._check_confidence(signal, strategy_config):
                 return False
-
+                
             # Check position limits
             if not self._check_position_limits(signal, strategy_config):
                 return False
-
-            # Check drawdown limits
+                
+            # Check drawdown
             if not self._check_drawdown(strategy_config):
                 return False
-
-            # Check daily loss limits
+                
+            # Check daily loss
             if not self._check_daily_loss(strategy_config):
                 return False
-
+                
             # Check duplicate signals
             if not self._check_duplicate_signal(signal, strategy_config):
                 return False
-
-            # Check stop loss and take profit
-            if not self._validate_sl_tp(signal, strategy_config):
-                return False
-
-            # Update last signal timestamp
-            self._update_last_signal(signal)
+                
+            # Update last signal tracking
+            symbol = signal.get('symbol', 'default')
+            direction = signal.get('direction', 'long')
+            if direction == 'long':
+                self.last_long_signals[symbol] = signal
+                self.last_long_signal_time[symbol] = datetime.now()
+            else:
+                self.last_short_signals[symbol] = signal
+                self.last_short_signal_time[symbol] = datetime.now()
+            
             return True
-
+            
         except Exception as e:
             self.logger.error(f"Error in risk check: {str(e)}")
             return False
 
     def _validate_signal(self, signal: Dict[str, Any]) -> bool:
         """Validate basic signal structure."""
-        required_fields = ['action', 'price', 'timestamp', 'confidence', 'strategy']
+        required_fields = ['symbol', 'action', 'price', 'timestamp', 'confidence', 'strategy']
         if not all(field in signal for field in required_fields):
             self.logger.warning("Signal missing required fields")
             return False
@@ -116,85 +138,72 @@ class RiskManager:
 
     def _check_position_limits(self, signal: Dict[str, Any], config: Dict[str, Any]) -> bool:
         """Check if opening new position complies with limits."""
-        max_positions = config.get('max_open_positions', 1)
-        current_positions = len(self.portfolio.get_open_positions())
+        max_positions_total = config.get('max_open_positions_total', 3)
+        max_positions_per_symbol = config.get('max_open_positions_per_symbol', 1)
         
-        if current_positions >= max_positions:
-            self.logger.warning(f"Max positions ({max_positions}) reached")
+        # Check total positions
+        total_positions = len(self.portfolio.get_open_positions())
+        if total_positions >= max_positions_total:
+            self.logger.warning(f"Total positions {total_positions} at limit {max_positions_total}")
             return False
+            
+        # Check positions per symbol
+        symbol_positions = len(self.portfolio.get_open_positions(signal['symbol']).get(signal['symbol'], []))
+        if symbol_positions >= max_positions_per_symbol:
+            self.logger.warning(f"Symbol positions {symbol_positions} at limit {max_positions_per_symbol}")
+            return False
+            
         return True
 
     def _check_drawdown(self, config: Dict[str, Any]) -> bool:
         """Check if current drawdown is within limits."""
-        max_drawdown = config.get('max_drawdown_percent', 10)
-        current_drawdown = self.portfolio.get_drawdown()
+        max_drawdown = config.get('max_drawdown_percent', 10.0)
+        current_drawdown = self.portfolio.get_current_drawdown()
         
-        if current_drawdown > max_drawdown:
-            self.logger.warning(f"Drawdown {current_drawdown}% exceeds limit {max_drawdown}%")
+        if current_drawdown >= max_drawdown:
+            self.logger.warning(f"Current drawdown {current_drawdown:.2f}% exceeds limit {max_drawdown}%")
             return False
+            
         return True
 
     def _check_daily_loss(self, config: Dict[str, Any]) -> bool:
         """Check if daily loss is within limits."""
-        max_daily_loss = config.get('max_daily_loss', 300)
+        max_daily_loss = config.get('max_daily_loss', 300.0)
         daily_pnl = self.portfolio.get_daily_pnl()
         
-        if daily_pnl < -max_daily_loss:
+        if daily_pnl < 0 and abs(daily_pnl) >= max_daily_loss:
             self.logger.warning(f"Daily loss {abs(daily_pnl)} exceeds limit {max_daily_loss}")
             return False
+            
         return True
 
     def _check_duplicate_signal(self, signal: Dict[str, Any], config: Dict[str, Any]) -> bool:
-        """Check for duplicate signals within time window."""
+        """Check if signal is a duplicate of a recent signal."""
         symbol = signal.get('symbol', 'default')
+        direction = signal.get('direction', 'long')
         block_minutes = config.get('duplicate_signal_block_minutes', 5)
         
-        if symbol in self.last_signals:
-            last_signal = self.last_signals[symbol]
-            time_diff = datetime.now() - last_signal['timestamp']
-            
-            if (time_diff < timedelta(minutes=block_minutes) and 
-                last_signal['action'] == signal['action']):
-                self.logger.warning(f"Duplicate {signal['action']} signal for {symbol}")
-                return False
+        # Get the appropriate signal history based on direction
+        last_signals = self.last_long_signals if direction == 'long' else self.last_short_signals
+        last_signal_times = self.last_long_signal_time if direction == 'long' else self.last_short_signal_time
+        
+        # Check if we have a recent signal for this symbol and direction
+        if symbol in last_signal_times:
+            time_diff = datetime.now() - last_signal_times[symbol]
+            if time_diff.total_seconds() < block_minutes * 60:
+                last_signal = last_signals.get(symbol, {})
+                
+                # Check if price has changed significantly
+                if abs(last_signal.get('price', 0) - signal.get('price', 0)) < 0.01:
+                    self.logger.warning(f"Duplicate signal within {block_minutes} minutes")
+                    return False
+        
         return True
 
-    def _validate_sl_tp(self, signal: Dict[str, Any], config: Dict[str, Any]) -> bool:
-        """Validate stop loss and take profit levels."""
-        price = signal['price']
-        default_sl = config.get('default_sl_percent', 2.0)
-        default_tp = config.get('default_tp_percent', 4.0)
-        
-        # Calculate SL/TP levels
-        if signal['action'] == 'buy':
-            sl_price = price * (1 - default_sl/100)
-            tp_price = price * (1 + default_tp/100)
-        else:  # sell
-            sl_price = price * (1 + default_sl/100)
-            tp_price = price * (1 - default_tp/100)
-        
-        # Validate risk-reward ratio
-        risk = abs(price - sl_price)
-        reward = abs(tp_price - price)
-        min_rr_ratio = config.get('min_rr_ratio', 1.5)  # Minimum risk-reward ratio
-        
-        if reward/risk < min_rr_ratio:
-            self.logger.warning(f"Risk-reward ratio {reward/risk:.2f} below minimum {min_rr_ratio}")
-            return False
-            
-        return True
-
-    def _update_last_signal(self, signal: Dict[str, Any]) -> None:
-        """Update last signal timestamp."""
-        symbol = signal.get('symbol', 'default')
-        self.last_signals[symbol] = {
-            'action': signal['action'],
-            'timestamp': datetime.now()
-        }
-
-    def get_position_size(self, signal: Dict[str, Any]) -> float:
+    def get_position_size(self, signal: Dict[str, Any], strategy_config: Dict[str, Any] = None) -> float:
         """Calculate position size based on risk parameters."""
-        strategy_config = self._get_strategy_config(signal.get('strategy', ''))
+        if strategy_config is None:
+            strategy_config = self._get_strategy_config(signal.get('strategy', ''))
         
         price = signal['price']
         account_value = self.portfolio.current_capital

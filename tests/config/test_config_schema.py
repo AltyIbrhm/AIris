@@ -2,7 +2,7 @@
 Tests for the configuration schema validation.
 """
 import pytest
-from config.schema import validate_config, ConfigError
+from config.schema import Config, ConfigError
 
 @pytest.fixture
 def valid_config():
@@ -14,22 +14,64 @@ def valid_config():
             'api_secret': 'test_secret'
         },
         'trading': {
-            'symbols': ['BTCUSDT', 'ETHUSDT'],
-            'timeframe': '1h',
-            'max_position_size': 1000,
-            'max_daily_trades': 5
+            'exchange': 'binance',
+            'symbols': ['BTC/USDT', 'ETH/USDT'],
+            'interval': '1h',
+            'poll_interval': 60,
+            'risk_config': {
+                'min_confidence': 0.3,
+                'max_open_positions_total': 3,
+                'max_open_positions_per_symbol': 1,
+                'max_drawdown_percent': 10.0,
+                'max_daily_loss': 300.0,
+                'default_sl_percent': 2.0,
+                'default_tp_percent': 4.0,
+                'duplicate_signal_block_minutes': 5,
+                'max_position_size_percent': 10.0,
+                'max_leverage': 1.0,
+                'risk_free_rate': 0.02,
+                'volatility_lookback': 20,
+                'position_sizing_method': 'kelly',
+                'emergency_stop_loss_percent': 5.0
+            },
+            'ai_model_config': {
+                'model_type': 'lstm',
+                'input_features': ['open', 'high', 'low', 'close', 'volume'],
+                'output_features': ['direction', 'confidence'],
+                'sequence_length': 100,
+                'batch_size': 32,
+                'learning_rate': 0.001,
+                'epochs': 100,
+                'validation_split': 0.2
+            },
+            'paper_trading': True,
+            'log_level': 'INFO'
         },
         'risk': {
-            'max_drawdown': 0.2,
-            'stop_loss': 0.05,
-            'take_profit': 0.1
+            'min_confidence': 0.3,
+            'max_open_positions_total': 3,
+            'max_open_positions_per_symbol': 1,
+            'max_drawdown_percent': 10.0,
+            'max_daily_loss': 300.0,
+            'default_sl_percent': 2.0,
+            'default_tp_percent': 4.0,
+            'duplicate_signal_block_minutes': 5,
+            'max_position_size_percent': 10.0,
+            'max_leverage': 1.0,
+            'risk_free_rate': 0.02,
+            'volatility_lookback': 20,
+            'position_sizing_method': 'kelly',
+            'emergency_stop_loss_percent': 5.0
         },
         'model': {
-            'type': 'lstm',
-            'input_dim': 10,
-            'hidden_dim': 64,
-            'num_layers': 2,
-            'dropout': 0.2
+            'model_type': 'lstm',
+            'input_features': ['open', 'high', 'low', 'close', 'volume'],
+            'output_features': ['direction', 'confidence'],
+            'sequence_length': 100,
+            'batch_size': 32,
+            'learning_rate': 0.001,
+            'epochs': 100,
+            'validation_split': 0.2
         }
     }
 
@@ -41,30 +83,55 @@ def invalid_config():
             'name': 'invalid_exchange'
         },
         'trading': {
-            'symbols': 'BTCUSDT',  # Should be a list
+            'symbols': 'BTCUSDT',
             'timeframe': 'invalid_timeframe'
         }
     }
 
+@pytest.fixture
+def invalid_timeframe_config():
+    """Create a configuration with invalid timeframe."""
+    config = valid_config()
+    config['trading']['interval'] = 'invalid'
+    return config
+
+@pytest.fixture
+def invalid_risk_config():
+    """Create a configuration with invalid risk parameters."""
+    config = valid_config()
+    config['risk']['max_drawdown_percent'] = -10.0  # Invalid negative value
+    return config
+
+@pytest.fixture
+def invalid_model_config():
+    """Create a configuration with invalid model parameters."""
+    config = valid_config()
+    config['model']['learning_rate'] = -0.001  # Invalid negative value
+    return config
+
 def test_valid_configuration(valid_config):
     """Test validation of valid configuration."""
-    assert validate_config(valid_config) is True
+    config = Config(**valid_config)
+    assert isinstance(config, Config)
+    assert config.exchange.name == 'binance'
+    assert config.trading.symbols == ['BTC/USDT', 'ETH/USDT']
+    assert config.trading.interval == '1h'
 
 def test_invalid_configuration(invalid_config):
     """Test validation of invalid configuration."""
     with pytest.raises(ConfigError) as exc_info:
-        validate_config(invalid_config)
+        Config(**invalid_config)
     assert "Invalid configuration" in str(exc_info.value)
 
 def test_missing_required_fields():
-    """Test validation with missing required fields."""
+    """Test validation of missing required fields."""
     config = {
         'exchange': {
             'name': 'binance'
         }
     }
     with pytest.raises(ConfigError) as exc_info:
-        validate_config(config)
+        Config(**config)
     assert "Missing required fields" in str(exc_info.value)
 
 def test_invalid_exchange_name():
@@ -81,65 +148,29 @@ def test_invalid_exchange_name():
         }
     }
     with pytest.raises(ConfigError) as exc_info:
-        validate_config(config)
+        Config(**config)
     assert "Invalid exchange name" in str(exc_info.value)
 
-def test_invalid_timeframe():
-    """Test validation of invalid timeframe."""
-    config = {
-        'exchange': {
-            'name': 'binance',
-            'api_key': 'test_key',
-            'api_secret': 'test_secret'
-        },
-        'trading': {
-            'symbols': ['BTCUSDT'],
-            'timeframe': 'invalid_timeframe'
-        }
-    }
+def test_invalid_timeframe(valid_config):
+    """Test that invalid timeframe raises error."""
+    config = valid_config.copy()
+    config['trading']['interval'] = 'invalid'
     with pytest.raises(ConfigError) as exc_info:
-        validate_config(config)
+        Config(**config)
     assert "Invalid timeframe" in str(exc_info.value)
 
-def test_invalid_risk_parameters():
-    """Test validation of invalid risk parameters."""
-    config = {
-        'exchange': {
-            'name': 'binance',
-            'api_key': 'test_key',
-            'api_secret': 'test_secret'
-        },
-        'trading': {
-            'symbols': ['BTCUSDT'],
-            'timeframe': '1h'
-        },
-        'risk': {
-            'max_drawdown': 2.0,  # Should be between 0 and 1
-            'stop_loss': -0.05    # Should be positive
-        }
-    }
+def test_invalid_risk_parameters(valid_config):
+    """Test that invalid risk parameters raise error."""
+    config = valid_config.copy()
+    config['risk']['max_drawdown_percent'] = -10.0  # Invalid negative value
     with pytest.raises(ConfigError) as exc_info:
-        validate_config(config)
-    assert "Invalid risk parameters" in str(exc_info.value)
+        Config(**config)
+    assert "Input should be greater than 0" in str(exc_info.value)
 
-def test_invalid_model_parameters():
-    """Test validation of invalid model parameters."""
-    config = {
-        'exchange': {
-            'name': 'binance',
-            'api_key': 'test_key',
-            'api_secret': 'test_secret'
-        },
-        'trading': {
-            'symbols': ['BTCUSDT'],
-            'timeframe': '1h'
-        },
-        'model': {
-            'type': 'invalid_model',
-            'input_dim': -10,  # Should be positive
-            'hidden_dim': 0    # Should be positive
-        }
-    }
+def test_invalid_model_parameters(valid_config):
+    """Test that invalid model parameters raise error."""
+    config = valid_config.copy()
+    config['model']['learning_rate'] = -0.001  # Invalid negative value
     with pytest.raises(ConfigError) as exc_info:
-        validate_config(config)
-    assert "Invalid model parameters" in str(exc_info.value) 
+        Config(**config)
+    assert "Input should be greater than 0" in str(exc_info.value) 
