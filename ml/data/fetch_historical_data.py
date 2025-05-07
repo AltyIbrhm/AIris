@@ -45,7 +45,12 @@ class HistoricalDataFetcher:
         if not api_key or not api_secret:
             raise ValueError("BINANCE_API_KEY and BINANCE_API_SECRET must be set in .env file")
         
-        self.client = Client(api_key, api_secret)
+        # Initialize Binance.US client
+        self.client = Client(
+            api_key,
+            api_secret,
+            tld='us'  # Use Binance.US
+        )
         
         # Create data directory if it doesn't exist
         os.makedirs(data_dir, exist_ok=True)
