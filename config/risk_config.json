@@ -1,0 +1,41 @@
+{
+    "default": {
+        "min_confidence": 0.3,
+        "max_open_positions": 1,
+        "max_drawdown_percent": 10,
+        "max_daily_loss": 300,
+        "default_sl_percent": 2.0,
+        "default_tp_percent": 4.0,
+        "duplicate_signal_block_minutes": 5,
+        "max_position_size_percent": 10,
+        "max_leverage": 1.0,
+        "risk_free_rate": 0.02,
+        "volatility_lookback": 20,
+        "position_sizing_method": "kelly",
+        "emergency_stop_loss_percent": 5.0
+    },
+    "trend_following": {
+        "min_confidence": 0.4,
+        "max_open_positions": 2,
+        "default_sl_percent": 3.0,
+        "default_tp_percent": 6.0,
+        "max_position_size_percent": 15,
+        "volatility_lookback": 30
+    },
+    "mean_reversion": {
+        "min_confidence": 0.5,
+        "max_open_positions": 1,
+        "default_sl_percent": 1.5,
+        "default_tp_percent": 3.0,
+        "max_position_size_percent": 8,
+        "volatility_lookback": 15
+    },
+    "momentum": {
+        "min_confidence": 0.35,
+        "max_open_positions": 3,
+        "default_sl_percent": 2.5,
+        "default_tp_percent": 5.0,
+        "max_position_size_percent": 12,
+        "volatility_lookback": 25
+    }
+} 
