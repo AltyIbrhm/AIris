@@ -37,13 +37,17 @@ def normalize_features(df: pd.DataFrame) -> pd.DataFrame:
         'macd_line', 'macd_signal',
         'bb_width', 'bb_zscore',
         'momentum_10', 'rate_of_change_5',
-        'volume_zscore_10'
+        'volume_zscore_10',
+        'trend_strength',  # Composite features
+        'volatility_pulse',
+        'trend_volatility_score'
     ]
     
     # Features that should be min-max scaled to [0, 1]
     minmax_features = [
         'bb_b', 'high_low_pct',
-        'atr_14', 'atr_pct'
+        'atr_14', 'atr_pct',
+        'bb_trend_zone'  # Composite feature
     ]
     
     # Features that should be kept in their original range
@@ -53,6 +57,7 @@ def normalize_features(df: pd.DataFrame) -> pd.DataFrame:
         'macd_hist', 'macd_hist_lag1',  # MACD histogram should be kept in original range
         'log_return_1', 'log_return_1_lag1',  # Log returns should be kept in original range
         'log_return_5',  # Log returns should be kept in original range
+        'volatility_adjusted_return',  # Ratio should be kept in original range
         # Regime flags should be kept in their original range (0, 1, or 0-2)
         'is_trending', 'high_volatility', 'low_volatility',
         'is_ranging', 'price_above_bb_mid', 'rsi_regime'
@@ -153,6 +158,22 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
         df["rsi_14"] = df["rsi_14"].fillna(50)
         df["rsi_regime"] = pd.cut(df["rsi_14"], bins=[0, 30, 70, 100], labels=[0, 1, 2]).astype(int)
         
+        # --- Composite Features ---
+        # 1. Trend Strength (MACD histogram × EMA ratio)
+        df["trend_strength"] = df["macd_hist"] * df["ema_ratio"]
+        
+        # 2. Volatility Pulse (Log return × Volume z-score)
+        df["volatility_pulse"] = df["log_return_1"] * df["volume_zscore_10"]
+        
+        # 3. BB Trend Zone (BB position × Trend context)
+        df["bb_trend_zone"] = df["bb_b"] * df["is_trending"]
+        
+        # 4. Volatility Adjusted Return (Return normalized by ATR)
+        df["volatility_adjusted_return"] = df["log_return_5"] / (df["atr_pct"] + 1e-9)  # Add small constant to prevent division by zero
+        
+        # 5. Trend Volatility Score (Combined trend signals × volatility)
+        df["trend_volatility_score"] = (df["ema_ratio"] + df["macd_hist"]) * df["bb_width"]
+        
         # Replace infinite values with NaN and then forward fill
         df = df.replace([np.inf, -np.inf], np.nan)
         df = df.fillna(method='ffill').fillna(method='bfill')
@@ -167,7 +188,8 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
             'macd_hist_lag1': df['macd_hist_lag1'].copy(),
             'log_return_1': df['log_return_1'].copy(),
             'log_return_1_lag1': df['log_return_1_lag1'].copy(),
-            'log_return_5': df['log_return_5'].copy()
+            'log_return_5': df['log_return_5'].copy(),
+            'volatility_adjusted_return': df['volatility_adjusted_return'].copy()  # Keep ratio in original range
         }
         
         # Normalize features

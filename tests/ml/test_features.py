@@ -41,7 +41,10 @@ def test_feature_generation(sample_ohlcv_data):
         'rsi_14_lag1', 'macd_hist_lag1', 'log_return_1_lag1', 'obv_lag1',
         # Regime flags
         'is_trending', 'high_volatility', 'low_volatility',
-        'is_ranging', 'price_above_bb_mid', 'rsi_regime'
+        'is_ranging', 'price_above_bb_mid', 'rsi_regime',
+        # Composite features
+        'trend_strength', 'volatility_pulse', 'bb_trend_zone',
+        'volatility_adjusted_return', 'trend_volatility_score'
     ]
     
     for feature in required_features:
@@ -63,14 +66,15 @@ def test_feature_generation(sample_ohlcv_data):
         'macd_line', 'macd_signal',
         'bb_width', 'bb_zscore',
         'momentum_10', 'rate_of_change_5',
-        'volume_zscore_10'
+        'volume_zscore_10',
+        'trend_strength', 'volatility_pulse', 'trend_volatility_score'
     ]
     for col in zscore_features:
         assert abs(df[col].mean()) < 0.1, f"Feature {col} mean is too far from 0"
         assert abs(df[col].std() - 1) < 0.1, f"Feature {col} std is too far from 1"
     
     # Check min-max scaled features
-    minmax_features = ['bb_b', 'high_low_pct', 'atr_14', 'atr_pct']
+    minmax_features = ['bb_b', 'high_low_pct', 'atr_14', 'atr_pct', 'bb_trend_zone']
     for col in minmax_features:
         assert df[col].min() >= -0.1 and df[col].max() <= 1.1, f"Feature {col} is not properly min-max scaled"
 
@@ -167,4 +171,47 @@ def test_regime_flags():
         elif rsi >= 70:
             assert regime == 2, "RSI regime 2 boundary incorrect"
         else:
-            assert regime == 1, "RSI regime 1 boundary incorrect" 
+            assert regime == 1, "RSI regime 1 boundary incorrect"
+
+def test_composite_features(sample_ohlcv_data):
+    """Test composite feature generation and properties"""
+    df = generate_features(sample_ohlcv_data)
+    
+    # Check presence of composite features
+    composite_features = [
+        "trend_strength", "volatility_pulse", "bb_trend_zone",
+        "volatility_adjusted_return", "trend_volatility_score"
+    ]
+    for feature in composite_features:
+        assert feature in df.columns, f"Missing composite feature: {feature}"
+        assert not df[feature].isnull().any(), f"NaN values found in {feature}"
+        assert df[feature].dtype != "object", f"Invalid dtype for {feature}"
+    
+    # Test bb_trend_zone
+    assert df["bb_trend_zone"].between(0, 1).all(), "BB trend zone out of range [0, 1]"
+    
+    # Test volatility_adjusted_return
+    # Check that it's not normalized
+    assert not df["volatility_adjusted_return"].between(-1, 1).all(), "Volatility adjusted return should not be normalized"
+    
+    # Test normalization
+    # Z-score normalized features
+    zscore_features = ["trend_strength", "volatility_pulse", "trend_volatility_score"]
+    for feature in zscore_features:
+        assert abs(df[feature].mean()) < 0.1, f"{feature} not properly z-score normalized (mean)"
+        assert abs(df[feature].std() - 1) < 0.1, f"{feature} not properly z-score normalized (std)"
+    
+    # Min-max scaled features
+    assert df["bb_trend_zone"].between(0, 1).all(), "BB trend zone not properly min-max scaled"
+    
+    # Test feature relationships
+    # BB trend zone should be 0 when not trending
+    assert all(df[df["is_trending"] == 0]["bb_trend_zone"] == 0), "BB trend zone should be 0 when not trending"
+    
+    # Volatility pulse should be high when both return and volume are high
+    high_vol_pulse = df["volatility_pulse"].abs().max()
+    assert high_vol_pulse > 0, "Volatility pulse should capture high impact moves"
+    
+    # Trend strength should correlate with MACD and EMA ratio
+    trend_strength_corr = df["trend_strength"].corr(df["macd_hist"])
+    assert abs(trend_strength_corr) > 0.1, "Trend strength should correlate with MACD" 
