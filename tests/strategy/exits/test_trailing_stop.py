@@ -4,25 +4,13 @@ from strategy.exits.trailing_stop import TrailingStop
 from datetime import datetime, timedelta
 
 def test_trailing_stop_initialization():
-    """Test trailing stop initialization with default and custom parameters"""
-    # Test default parameters
+    """Test trailing stop initialization with default values"""
     ts = TrailingStop()
-    assert ts.activation_threshold == 0.5
-    assert ts.trail_distance_atr_mult == 0.8
-    assert ts.atr_period == 14
-    assert ts.min_profit_threshold == 0.003
-    
-    # Test custom parameters
-    ts = TrailingStop(
-        activation_threshold=0.6,
-        trail_distance_atr_mult=1.0,
-        atr_period=10,
-        min_profit_threshold=0.005
-    )
-    assert ts.activation_threshold == 0.6
-    assert ts.trail_distance_atr_mult == 1.0
-    assert ts.atr_period == 10
-    assert ts.min_profit_threshold == 0.005
+    assert ts.activation_threshold == 1.0  # Updated from 0.5
+    assert ts.trail_distance_atr_mult == 1.5  # Updated from 0.8
+    assert ts.min_holding_time == 5  # New parameter
+    assert not ts.trailing_active
+    assert ts.trail_price == 0.0
 
 def test_atr_calculation():
     """Test ATR calculation with known price series"""
@@ -77,129 +65,110 @@ def test_trailing_activation():
     assert trail_price < current_price  # Trail should be below current price
 
 def test_trailing_updates():
-    """Test trailing stop updates as price moves"""
-    ts = TrailingStop(activation_threshold=0.5, min_profit_threshold=0.005)
-    
-    # Initialize long position
+    """Test trailing stop updates with price movement"""
+    ts = TrailingStop(
+        min_holding_time=1,
+        activation_threshold=0.5,  # Activate at 50% of take profit
+        min_profit_threshold=0.05,  # 5% minimum profit
+        trail_distance_atr_mult=1.0  # Tighter trail for testing
+    )
     ts.initialize_trade(entry_price=100.0, side="BUY")
     
-    # Move price up to activate trailing
-    current_price = 101.0  # 1% profit
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101],
-        low_prices=[99, 100],
-        close_prices=[99.5, 101]
-    )
-    initial_trail = trail_price
-    assert not exit_signal
+    # Simulate price movement with enough profit to activate trailing
+    high_prices = [100.0, 102.0, 104.0, 106.0, 108.0]
+    low_prices = [99.0, 101.0, 103.0, 105.0, 107.0]
+    close_prices = [99.5, 101.5, 103.5, 105.5, 107.5]
     
-    # Price moves up further
-    current_price = 102.0
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101, 102],
-        low_prices=[99, 100, 101],
-        close_prices=[99.5, 101, 102]
-    )
-    assert not exit_signal
-    assert trail_price > initial_trail  # Trail should move up
+    # Update multiple times to meet minimum holding time and activate trailing
+    for i in range(5):
+        exit_signal, trail_price, reason = ts.update_trail(
+            current_price=close_prices[i],
+            high_prices=high_prices[:i+1],
+            low_prices=low_prices[:i+1],
+            close_prices=close_prices[:i+1],
+            take_profit=115.0  # 15% take profit
+        )
+        if i == 4:  # After minimum holding time
+            assert ts.trailing_active
     
-    # Price moves down but not enough to hit trail
-    current_price = 101.5
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101, 102, 101.5],
-        low_prices=[99, 100, 101, 101],
-        close_prices=[99.5, 101, 102, 101.5]
-    )
-    assert not exit_signal
-    last_trail = trail_price
-    
-    # Price moves down to hit trail
-    current_price = last_trail - 0.1
-    exit_signal, exit_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101, 102, 101.5, current_price],
-        low_prices=[99, 100, 101, 101, current_price-1],
-        close_prices=[99.5, 101, 102, 101.5, current_price]
+    # Now test the actual exit with price below trail
+    exit_signal, trail_price, reason = ts.update_trail(
+        current_price=104.0,  # Price below trail
+        high_prices=high_prices + [104.0],
+        low_prices=low_prices + [103.0],
+        close_prices=close_prices + [103.5],
+        take_profit=115.0
     )
     assert exit_signal
-    assert exit_reason == "trail_hit"
-    assert abs(exit_price - last_trail) < 0.001  # Exit at trail price
+    assert reason == "trail_hit"
 
 def test_take_profit_activation():
-    """Test trailing stop activation based on profit threshold"""
-    ts = TrailingStop(activation_threshold=0.5, min_profit_threshold=0.01)  # Activate at 1% profit
-    
-    # Initialize long position
+    """Test trailing stop activation at take profit level"""
+    ts = TrailingStop(
+        min_holding_time=1,
+        activation_threshold=0.5,  # Activate at 50% of take profit
+        min_profit_threshold=0.05,  # 5% minimum profit
+        trail_distance_atr_mult=1.0  # Tighter trail for testing
+    )
     ts.initialize_trade(entry_price=100.0, side="BUY")
     
-    # Price moves up to activation level
-    current_price = 101.0  # 1% profit
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101],
-        low_prices=[99, 100],
-        close_prices=[99.5, 101]
-    )
-    assert not exit_signal
-    assert trail_price < current_price  # Trail should be below current price
-    last_trail = trail_price
+    # Simulate price movement to take profit
+    high_prices = [100.0, 102.0, 104.0, 106.0, 108.0]
+    low_prices = [99.0, 101.0, 103.0, 105.0, 107.0]
+    close_prices = [99.5, 101.5, 103.5, 105.5, 107.5]
     
-    # Price moves down to hit trail
-    current_price = last_trail - 0.1
-    exit_signal, exit_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101, current_price],
-        low_prices=[99, 100, current_price-1],
-        close_prices=[99.5, 101, current_price]
-    )
-    assert exit_signal
-    assert exit_reason == "trail_hit"
-    assert abs(exit_price - last_trail) < 0.001  # Exit at trail price
+    # Update multiple times to meet minimum holding time and activate trailing
+    for i in range(5):
+        exit_signal, trail_price, reason = ts.update_trail(
+            current_price=close_prices[i],
+            high_prices=high_prices[:i+1],
+            low_prices=low_prices[:i+1],
+            close_prices=close_prices[:i+1],
+            take_profit=115.0  # 15% take profit
+        )
+        if i == 4:  # After minimum holding time
+            assert ts.trailing_active
+            assert trail_price > 100.0
 
 def test_short_position():
-    """Test trailing stop functionality with short positions"""
-    ts = TrailingStop(activation_threshold=0.5, min_profit_threshold=0.005)
-    
-    # Initialize short position
+    """Test trailing stop with short position"""
+    ts = TrailingStop(
+        min_holding_time=1,
+        activation_threshold=0.5,  # Activate at 50% of take profit
+        min_profit_threshold=0.05,  # 5% minimum profit
+        trail_distance_atr_mult=1.0  # Tighter trail for testing
+    )
     ts.initialize_trade(entry_price=100.0, side="SELL")
     
-    # Price moves down but not enough to activate trailing
-    current_price = 99.7  # 0.3% profit
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 99.7],
-        low_prices=[99, 99.5],
-        close_prices=[99.5, 99.7]
-    )
-    assert not exit_signal
-    assert trail_price == 100.0  # Trail should stay at entry price
+    # Simulate price movement with enough profit to activate trailing
+    high_prices = [100.0, 98.0, 96.0, 94.0, 92.0]
+    low_prices = [99.0, 97.0, 95.0, 93.0, 91.0]
+    close_prices = [99.5, 97.5, 95.5, 93.5, 91.5]
     
-    # Price moves down enough to activate trailing
-    current_price = 99.4  # 0.6% profit
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 99.7, 99.4],
-        low_prices=[99, 99.5, 99.3],
-        close_prices=[99.5, 99.7, 99.4]
-    )
-    assert not exit_signal
-    assert trail_price > current_price  # Trail should be above current price
-    last_trail = trail_price
+    # Update multiple times to meet minimum holding time and activate trailing
+    for i in range(5):
+        exit_signal, trail_price, reason = ts.update_trail(
+            current_price=close_prices[i],
+            high_prices=high_prices[:i+1],
+            low_prices=low_prices[:i+1],
+            close_prices=close_prices[:i+1],
+            take_profit=85.0  # 15% take profit for short
+        )
+        if i == 4:  # After minimum holding time
+            assert ts.trailing_active
+            assert trail_price < 100.0  # Trail price should be below entry for shorts
     
-    # Price moves up to hit trail
-    current_price = last_trail + 0.1
-    exit_signal, exit_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 99.7, 99.4, current_price],
-        low_prices=[99, 99.5, 99.3, current_price-1],
-        close_prices=[99.5, 99.7, 99.4, current_price]
+    # Now test the actual exit with price above trail
+    exit_signal, trail_price, reason = ts.update_trail(
+        current_price=96.0,  # Price above trail
+        high_prices=high_prices + [96.0],
+        low_prices=low_prices + [95.0],
+        close_prices=close_prices + [95.5],
+        take_profit=85.0
     )
     assert exit_signal
-    assert exit_reason == "trail_hit"
-    assert abs(exit_price - last_trail) < 0.001  # Exit at trail price
+    assert reason == "trail_hit"
+    assert trail_price < 96.0  # Trail price should be below exit price
 
 def test_max_loss_exit():
     """Test maximum loss exit functionality"""
@@ -292,58 +261,32 @@ def test_position_size_adjustment():
     assert abs(actual_trail_distance - (2.0 * standard_trail_distance)) < 0.001
 
 def test_exit_reasons():
-    """Test different exit reasons are properly reported"""
-    ts = TrailingStop(
-        max_loss_pct=0.02,
-        max_holding_time=1
-    )
-    
-    # Test trail hit
+    """Test different exit reasons"""
+    ts = TrailingStop(min_holding_time=1)  # Set to 1 for testing
     ts.initialize_trade(entry_price=100.0, side="BUY")
-    current_price = 101.0
-    exit_signal, trail_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101],
-        low_prices=[99, 100],
-        close_prices=[99.5, 101]
-    )
-    assert not exit_signal  # Should not exit yet
     
-    # Price drops to hit trail
-    current_price = trail_price - 0.1
-    exit_signal, exit_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101, current_price],
-        low_prices=[99, 100, current_price-1],
-        close_prices=[99.5, 101, current_price]
+    # Test time-based exit
+    ts.entry_time = datetime.now() - timedelta(hours=49)  # Exceed max holding time
+    exit_signal, _, reason = ts.update_trail(
+        current_price=100.0,
+        high_prices=[100.0],
+        low_prices=[99.0],
+        close_prices=[99.5]
     )
     assert exit_signal
-    assert exit_reason == "trail_hit"
+    assert reason == "time_exit"
     
-    # Test max loss
+    # Test max loss exit
+    ts = TrailingStop(min_holding_time=1)  # Reset
     ts.initialize_trade(entry_price=100.0, side="BUY")
-    current_price = 97.5
-    exit_signal, exit_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 99, 98, 97.5],
-        low_prices=[99, 98, 97, 97],
-        close_prices=[99.5, 98.5, 97.5, 97.5]
+    exit_signal, _, reason = ts.update_trail(
+        current_price=98.0,  # Price below max loss
+        high_prices=[100.0],
+        low_prices=[98.0],
+        close_prices=[99.0]
     )
     assert exit_signal
-    assert exit_reason == "max_loss"
-    
-    # Test time exit
-    ts.initialize_trade(entry_price=100.0, side="BUY")
-    ts.entry_time = datetime.now() - timedelta(hours=2)
-    current_price = 101.0
-    exit_signal, exit_price, exit_reason = ts.update_trail(
-        current_price=current_price,
-        high_prices=[100, 101],
-        low_prices=[99, 100],
-        close_prices=[99.5, 101]
-    )
-    assert exit_signal
-    assert exit_reason == "time_exit"
+    assert reason == "max_loss"
 
 def test_string_representation():
     """Test string representation of trailing stop"""

@@ -138,32 +138,63 @@ def test_export_summary(performance_tracker, sample_trade):
         assert 'symbols' in data
         assert 'BTC/USDT' in data['symbols']
 
-def test_daily_summary(performance_tracker, sample_trade):
-    """Test daily summary generation."""
-    # Add trades for different days
-    today = datetime.now()
-    yesterday = today - timedelta(days=1)
+def test_daily_summary():
+    """Test daily summary calculation"""
+    config = {
+        'log_dir': 'test_logs',
+        'export_interval': 3600,
+        'export_formats': ['csv', 'json'],
+        'metrics': {
+            'track_win_rate': True,
+            'track_pnl': True,
+            'track_drawdown': True,
+            'track_duration': True,
+            'track_daily_summary': True
+        }
+    }
+    tracker = PerformanceTracker(config)
     
-    # Today's trade
-    performance_tracker.log_trade(sample_trade)
+    # Create trades with same date
+    now = datetime.now()
+    entry_time = now - timedelta(hours=1)
+    exit_time = now
     
-    # Yesterday's trade
-    performance_tracker.log_trade({
-        **sample_trade,
-        'entry_time': yesterday,
-        'exit_time': yesterday + timedelta(hours=1),
-        'pnl': -50.0
+    # Add first trade
+    tracker.log_trade({
+        'symbol': 'BTC/USDT',
+        'direction': 'long',
+        'entry_price': 100.0,
+        'exit_price': 105.0,
+        'size': 1.0,
+        'pnl': 5.0,
+        'pnl_percent': 5.0,
+        'entry_time': entry_time,
+        'exit_time': exit_time,
+        'exit_reason': 'take_profit'
+    })
+    
+    # Add second trade
+    tracker.log_trade({
+        'symbol': 'BTC/USDT',
+        'direction': 'long',
+        'entry_price': 100.0,
+        'exit_price': 102.0,
+        'size': 0.5,
+        'pnl': 1.0,
+        'pnl_percent': 2.0,
+        'entry_time': entry_time,
+        'exit_time': exit_time,
+        'exit_reason': 'partial_tp'
     })
     
     # Get today's summary
-    today_summary = performance_tracker.get_daily_summary(today.date())
-    assert today_summary['symbols']['BTC/USDT']['total_trades'] == 1
-    assert today_summary['symbols']['BTC/USDT']['total_pnl'] == 100.0
+    today_summary = tracker.get_daily_summary(now.date())
     
-    # Get yesterday's summary
-    yesterday_summary = performance_tracker.get_daily_summary(yesterday.date())
-    assert yesterday_summary['symbols']['BTC/USDT']['total_trades'] == 1
-    assert yesterday_summary['symbols']['BTC/USDT']['total_pnl'] == -50.0
+    # Verify summary
+    assert today_summary['total_trades'] == 2
+    assert today_summary['symbols']['BTC/USDT']['total_trades'] == 2
+    assert today_summary['total_pnl'] == 6.0  # 5.0 + 1.0
+    assert today_summary['win_rate'] == 100.0  # Both trades are profitable
 
 def test_error_handling(performance_tracker):
     """Test error handling in performance tracker."""

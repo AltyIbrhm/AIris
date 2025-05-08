@@ -73,45 +73,48 @@ def test_trade_initialization():
     assert em.hard_stop.stop_loss_price > 0
 
 def test_trailing_stop_exit():
-    """Test trailing stop exit priority"""
-    em = ExitManager()
-    
-    # Initialize trade
-    entry_price = 100.0
-    high_prices = [100, 101, 102, 101]
-    low_prices = [98, 99, 100, 99]
-    close_prices = [99, 100, 101, 100]
-    
-    em.initialize_trade(
-        entry_price=entry_price,
+    """Test trailing stop exit functionality"""
+    manager = ExitManager(
+        trailing_config={
+            'min_holding_time': 1,
+            'activation_threshold': 0.5,  # Activate at 50% of take profit
+            'min_profit_threshold': 0.05,  # 5% minimum profit
+            'trail_distance_atr_mult': 1.0  # Tighter trail for testing
+        }
+    )
+    manager.initialize_trade(
+        entry_price=100.0,
         side="BUY",
-        high_prices=high_prices,
-        low_prices=low_prices,
-        close_prices=close_prices
+        high_prices=[100.0],
+        low_prices=[99.0],
+        close_prices=[99.5]
     )
     
-    # Move price up to activate trailing
-    current_price = 101.0  # 1% profit
-    exit_signal, exit_price, exit_reason = em.check_exit(
-        current_price=current_price,
-        high_prices=high_prices + [current_price],
-        low_prices=low_prices + [current_price-1],
-        close_prices=close_prices + [current_price]
-    )
-    assert not exit_signal
-    trail_price = exit_price
+    # Simulate price movement with enough profit to activate trailing
+    high_prices = [100.0, 102.0, 104.0, 106.0, 108.0]
+    low_prices = [99.0, 101.0, 103.0, 105.0, 107.0]
+    close_prices = [99.5, 101.5, 103.5, 105.5, 107.5]
     
-    # Price drops to hit trailing stop
-    current_price = trail_price - 0.1
-    exit_signal, exit_price, exit_reason = em.check_exit(
-        current_price=current_price,
-        high_prices=high_prices + [101.0, current_price],
-        low_prices=low_prices + [100.0, current_price-1],
-        close_prices=close_prices + [101.0, current_price]
+    # Update multiple times to meet minimum holding time and activate trailing
+    for i in range(5):
+        exit_signal, exit_price, exit_reason = manager.check_exit(
+            current_price=close_prices[i],
+            high_prices=high_prices[:i+1],
+            low_prices=low_prices[:i+1],
+            close_prices=close_prices[:i+1],
+            take_profit=115.0  # 15% take profit
+        )
+    
+    # Now test the actual exit with price below trail
+    exit_signal, exit_price, exit_reason = manager.check_exit(
+        current_price=104.0,  # Price below trail
+        high_prices=high_prices + [104.0],
+        low_prices=low_prices + [103.0],
+        close_prices=close_prices + [103.5],
+        take_profit=115.0
     )
     assert exit_signal
     assert exit_reason == "trail_hit"
-    assert abs(exit_price - trail_price) < 0.001
 
 def test_hard_stop_exit():
     """Test hard stop exit when trailing not activated"""

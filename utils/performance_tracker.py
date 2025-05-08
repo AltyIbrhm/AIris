@@ -254,29 +254,53 @@ class PerformanceTracker:
             'trades': []
         })
 
+        # Initialize global metrics
+        global_metrics = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'total_pnl': 0.0,
+            'max_drawdown': 0.0,
+            'trades': []
+        }
+
         # Aggregate trades for the specified date
         for symbol, metrics in self.metrics.items():
             for trade in metrics.trades:
                 if trade.exit_time.date() == date:
+                    # Update symbol metrics
                     daily_metrics[symbol]['total_trades'] += 1
                     daily_metrics[symbol]['total_pnl'] += trade.pnl
                     if trade.win:
                         daily_metrics[symbol]['winning_trades'] += 1
                     daily_metrics[symbol]['trades'].append(trade)
 
+                    # Update global metrics
+                    global_metrics['total_trades'] += 1
+                    global_metrics['total_pnl'] += trade.pnl
+                    if trade.win:
+                        global_metrics['winning_trades'] += 1
+                    global_metrics['trades'].append(trade)
+
         # Calculate summary metrics
         summary = {
             'date': date.isoformat(),
+            'total_trades': global_metrics['total_trades'],
+            'total_pnl': global_metrics['total_pnl'],
+            'win_rate': (global_metrics['winning_trades'] / global_metrics['total_trades'] * 100)
+                if global_metrics['total_trades'] > 0 else 0.0,
+            'avg_pnl': global_metrics['total_pnl'] / global_metrics['total_trades']
+                if global_metrics['total_trades'] > 0 else 0.0,
+            'max_drawdown': global_metrics['max_drawdown'],
             'symbols': {}
         }
 
         for symbol, metrics in daily_metrics.items():
             summary['symbols'][symbol] = {
                 'total_trades': metrics['total_trades'],
-                'win_rate': (metrics['winning_trades'] / metrics['total_trades'] * 100) 
+                'win_rate': (metrics['winning_trades'] / metrics['total_trades'] * 100)
                     if metrics['total_trades'] > 0 else 0.0,
                 'total_pnl': metrics['total_pnl'],
-                'avg_pnl': metrics['total_pnl'] / metrics['total_trades'] 
+                'avg_pnl': metrics['total_pnl'] / metrics['total_trades']
                     if metrics['total_trades'] > 0 else 0.0,
                 'max_drawdown': metrics['max_drawdown']
             }

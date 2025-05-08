@@ -5,24 +5,26 @@ from datetime import datetime, timedelta
 class TrailingStop:
     def __init__(
         self,
-        activation_threshold: float = 0.5,  # Activates at 0.5 × TP
-        trail_distance_atr_mult: float = 0.8,  # Trail 0.8 × ATR behind price
+        activation_threshold: float = 1.0,  # Activates at 1.0 × TP
+        trail_distance_atr_mult: float = 1.5,  # Trail 1.5 × ATR behind price
         atr_period: int = 14,
-        min_profit_threshold: float = 0.003,  # Minimum profit to start trailing (0.3%)
-        max_loss_pct: float = 0.02,  # Maximum loss of 2%
+        min_profit_threshold: float = 0.005,  # Minimum profit to start trailing (0.5%)
+        max_loss_pct: float = 0.015,  # Maximum loss of 1.5%
         max_holding_time: int = 48,  # Maximum holding time in hours
+        min_holding_time: int = 5,  # Minimum holding time in bars
         position_size_mult: float = 1.0  # Position size multiplier for trail distance
     ):
         """
         Initialize Trailing Stop exit strategy
         
         Args:
-            activation_threshold (float): Multiple of take-profit to activate trailing (default: 0.5)
-            trail_distance_atr_mult (float): Multiple of ATR to trail behind price (default: 0.8)
+            activation_threshold (float): Multiple of take-profit to activate trailing (default: 1.0)
+            trail_distance_atr_mult (float): Multiple of ATR to trail behind price (default: 1.5)
             atr_period (int): Period for ATR calculation (default: 14)
-            min_profit_threshold (float): Minimum profit required to activate trailing (default: 0.3%)
-            max_loss_pct (float): Maximum loss percentage before forced exit (default: 2%)
+            min_profit_threshold (float): Minimum profit required to activate trailing (default: 0.5%)
+            max_loss_pct (float): Maximum loss percentage before forced exit (default: 1.5%)
             max_holding_time (int): Maximum holding time in hours (default: 48)
+            min_holding_time (int): Minimum holding time in bars (default: 5)
             position_size_mult (float): Position size multiplier for trail distance (default: 1.0)
         """
         self.activation_threshold = activation_threshold
@@ -31,6 +33,7 @@ class TrailingStop:
         self.min_profit_threshold = min_profit_threshold
         self.max_loss_pct = max_loss_pct
         self.max_holding_time = max_holding_time
+        self.min_holding_time = min_holding_time
         self.position_size_mult = position_size_mult
         
         # State variables
@@ -40,6 +43,7 @@ class TrailingStop:
         self.position_side = ""
         self.entry_time = None
         self.position_size = 0.0
+        self.bars_held = 0  # Track number of bars held
         
     def calculate_atr(self, high_prices: List[float], low_prices: List[float], close_prices: List[float]) -> float:
         """
@@ -146,6 +150,9 @@ class TrailingStop:
         if not self.position_side:
             return False, 0.0, ""
             
+        # Increment bars held
+        self.bars_held += 1
+            
         # Check time-based exit
         if self.check_time_exit():
             return True, current_price, "time_exit"
@@ -176,27 +183,23 @@ class TrailingStop:
         if not self.trailing_active and profit_pct >= activation_profit:
             self.trailing_active = True
             if self.position_side == "BUY":
-                # Set initial trail price to current price minus trail distance
-                # But ensure it's not below entry price
                 self.trail_price = max(current_price - trail_distance, self.entry_price)
             else:  # SELL
-                # Set initial trail price to current price plus trail distance
-                # But ensure it's not above entry price
                 self.trail_price = min(current_price + trail_distance, self.entry_price)
                 
         # Update trail price if active
         if self.trailing_active:
             if self.position_side == "BUY":
                 new_trail = current_price - trail_distance
-                # Ensure trail price is not below entry price
                 self.trail_price = max(self.trail_price, new_trail, self.entry_price)
-                if current_price < self.trail_price:
+                # Only exit if minimum holding time is met
+                if current_price < self.trail_price and self.bars_held >= self.min_holding_time:
                     return True, self.trail_price, "trail_hit"
             else:  # SELL
                 new_trail = current_price + trail_distance
-                # Ensure trail price is not above entry price
                 self.trail_price = min(self.trail_price, new_trail, self.entry_price)
-                if current_price > self.trail_price:
+                # Only exit if minimum holding time is met
+                if current_price > self.trail_price and self.bars_held >= self.min_holding_time:
                     return True, self.trail_price, "trail_hit"
                 
         return False, self.trail_price, ""

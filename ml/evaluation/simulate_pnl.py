@@ -36,7 +36,9 @@ class PnLSimulator:
         rsi_overbought: int = 70,
         rsi_oversold: int = 30,
         trailing_stop_activation: float = None,  # Will be loaded from config
-        trailing_stop_distance: float = None  # Will be loaded from config
+        trailing_stop_distance: float = None,  # Will be loaded from config
+        partial_tp_threshold: float = 1.0,  # Take partial profit at 1R
+        partial_tp_size: float = 0.5  # Take 50% of position at partial TP
     ):
         # Load risk config
         with open("config/risk_config.json", "r") as f:
@@ -57,6 +59,8 @@ class PnLSimulator:
         self.rsi_oversold = rsi_oversold
         self.trailing_stop_activation = trailing_stop_activation or float(risk_config.get('trailing_stop_activation', 0.5))
         self.trailing_stop_distance = trailing_stop_distance or float(risk_config.get('trailing_stop_distance', 0.8))
+        self.partial_tp_threshold = partial_tp_threshold
+        self.partial_tp_size = partial_tp_size
         
         # Initialize ExitManager with config
         trailing_config = {
@@ -198,7 +202,7 @@ class PnLSimulator:
     
     def execute_trade(
         self,
-        signal: Dict[str, Any],  # Changed from int to Dict
+        signal: Dict[str, Any],
         price: float,
         high: float,
         low: float,
@@ -231,6 +235,40 @@ class PnLSimulator:
             high_prices = [p['high'] for p in self.price_history]
             low_prices = [p['low'] for p in self.price_history]
             close_prices = [p['close'] for p in self.price_history]
+            
+            # Check for partial profit-taking
+            if not self.current_position.get('partial_tp_taken', False):
+                risk_amount = abs(self.current_position['entry_price'] - self.current_position['stop_loss'])
+                profit_target = risk_amount * self.partial_tp_threshold
+                
+                if self.current_position['type'] == 'BUY':
+                    current_profit = price - self.current_position['entry_price']
+                else:  # SELL
+                    current_profit = self.current_position['entry_price'] - price
+                    
+                if current_profit >= profit_target:
+                    # Take partial profit
+                    partial_size = self.current_position['size'] * self.partial_tp_size
+                    partial_pnl = current_profit * partial_size
+                    
+                    # Update position size
+                    self.current_position['size'] *= (1 - self.partial_tp_size)
+                    self.current_position['partial_tp_taken'] = True
+                    
+                    # Update balance
+                    self.balance_history[-1] += partial_pnl
+                    
+                    # Record partial profit trade
+                    self.trades.append({
+                        'type': f"{self.current_position['type']}_PARTIAL",
+                        'entry_price': self.current_position['entry_price'],
+                        'exit_price': price,
+                        'size': partial_size,
+                        'pnl': partial_pnl,
+                        'entry_time': self.current_position['entry_time'],
+                        'exit_time': timestamp,
+                        'exit_reason': 'partial_tp'
+                    })
             
             # Check exit conditions using ExitManager
             exit_signal, exit_price, exit_reason = self.exit_manager.check_exit(
